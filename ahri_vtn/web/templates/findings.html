@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}Findings{% endblock %}
+{% block content %}
+<h1>Findings</h1>
+<form method="get" class="inline"><select name="ven"><option value="">all VENs</option>{% for v in vens %}<option value="{{ v.id }}" {{ 'selected' if v.id == selected_ven }}>{{ v.ven_name }}</option>{% endfor %}</select><button class="btn">Filter</button></form>
+<table class="grid small" data-live>
+  <thead><tr><th>Time</th><th>Severity</th><th>Code</th><th>Message</th><th>Run</th><th>Evidence</th></tr></thead>
+  <tbody>{% for f in findings %}
+    <tr><td>{{ f.ts|ts }}</td><td><span class="tag {{ f.severity|status_class }}">{{ f.severity }}</span></td><td><code>{{ f.code }}</code></td><td>{{ f.message }}</td><td>{% if f.run_pk %}<a href="/ui/runs/{{ f.run_pk }}">{{ f.run_pk }}</a>{% endif %}</td><td class="small muted">{{ f.evidence|tojson if f.evidence else '' }}</td></tr>
+  {% else %}<tr><td colspan="6" class="muted">none</td></tr>{% endfor %}</tbody>
+</table>
+{% endblock %}

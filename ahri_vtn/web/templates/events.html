@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Events{% endblock %}
+{% block content %}
+<h1>Events</h1>
+<form method="post" action="/ui/events" class="event-form">
+  <input type="hidden" name="back" value="/ui/events">
+  <select name="ven_pk" required><option value="">VEN...</option>{% for v in vens %}<option value="{{ v.id }}" {{ 'selected' if v.id == selected_ven }}>{{ v.ven_name }}{% if not v.registered %} (not registered){% endif %}</option>{% endfor %}</select>
+  <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
+  <label>start in <input name="start_offset_seconds" value="0" size="4"> s</label>
+  <label>duration <input name="duration_minutes" value="{{ config.default_event_duration_minutes }}" size="4"> min</label>
+  <label>payload <input name="payload" size="4" placeholder="auto"></label>
+  <label>MITO <input name="mito" size="3" placeholder="deg F"></label>
+  <label>prices <input name="price_multipliers" size="20" placeholder="1.0,1.2,..."></label>
+  <label>interval <input name="price_interval_minutes" value="60" size="3"> min</label>
+  <label><input type="checkbox" name="test_event" value="1"> testEvent</label>
+  <input name="vtn_comment" placeholder="vtnComment" size="18">
+  <button class="btn primary">Send event</button>
+</form>
+<p class="muted small">Table 8: SIMPLE level 1 = General Curtailment (70 %), 2 = Critical Curtailment (40 %, two-capacity units NAK 460), 3 = Full Curtailment / off.
+LOAD_CONTROL:x-loadControlLevelOffset carries the Maximum Indoor Temperature Offset (&le; 4 F). ELECTRICITY_PRICE:priceMultiplier needs &ge; 25 intervals. Cancelling re-sends the event with eventStatus CANCELLED.</p>
+<table class="grid small" data-live>
+  <thead><tr><th>VEN</th><th>Preset</th><th>Event</th><th>Start</th><th>End</th><th>Signals</th><th>Status</th><th>Responses</th><th>Source</th><th></th></tr></thead>
+  <tbody>
+  {% for e in events %}
+    <tr>
+      <td><a href="/ui/vens/{{ e.ven_pk }}">{{ e.ven_name }}</a></td>
+      <td>{{ e.preset_label }}{% if e.test_event %} <span class="tag muted">test</span>{% endif %}</td>
+      <td><code class="small">{{ e.event_id[:8] }}</code></td>
+      <td>{{ e.dtstart|ts }}</td><td>{{ e.dtend|time }}</td>
+      <td>{% for s in e.signals %}<div>{{ s.signal_name }}:{{ s.signal_type }} = {% if s.intervals|length == 1 %}{{ s.intervals[0].payload }}{% else %}{{ s.intervals|length }} intervals{% endif %}</div>{% endfor %}</td>
+      <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} m{{ e.modification_number }}{% endif %}</td>
+      <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }} <span class="muted">m{{ r.modification_number }} {{ r.received_at|time }}</span></div>{% else %}<span class="muted">-</span>{% endfor %}</td>
+      <td>{{ e.source }}</td>
+      <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel</button></form>{% endif %}</td>
+    </tr>
+  {% else %}<tr><td colspan="10" class="muted">no events</td></tr>{% endfor %}
+  </tbody>
+</table>
+{% endblock %}

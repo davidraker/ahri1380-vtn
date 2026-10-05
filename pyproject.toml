@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ahri-vtn"
+version = "0.1.0"
+description = "OpenADR 2.0b VTN test tool for AHRI Standard 1380 (Demand Response through Variable Capacity HVAC Systems)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "openleadr",            # installed editable from ./openleadr-python (branch ahri-1380)
+    "aiohttp>=3.8",
+    "SQLAlchemy>=2.0",
+    "Jinja2>=3.0",
+    "pydantic>=2.0",
+    "APScheduler>=3.9,<4",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "pytest-timeout"]
+
+[project.scripts]
+ahri-vtn = "ahri_vtn.__main__:main"
+ahri-sim-ven = "sim_ven.ahri_sim_ven:main"
+
+[tool.setuptools]
+packages = ["ahri_vtn", "ahri_vtn.db", "ahri_vtn.handlers", "ahri_vtn.conformance", "ahri_vtn.web", "sim_ven"]
+
+[tool.setuptools.package-data]
+"ahri_vtn.web" = ["templates/*.html", "static/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]

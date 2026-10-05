@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}{{ ven.ven_name }}{% endblock %}
+{% block content %}
+<h1>{{ ven.ven_name }}
+  {% if ven.online %}<span class="tag ok">online</span>{% elif ven.registered %}<span class="tag warn">silent</span>{% else %}<span class="tag muted">not registered</span>{% endif %}
+  {% if not ven.enabled %}<span class="tag muted">disabled</span>{% endif %}
+</h1>
+
+<section class="two">
+  <div data-live>
+    <h2>Registration</h2>
+    <table class="kv">
+      <tr><th>venID</th><td><code>{{ ven.ven_id or '-' }}</code></td></tr>
+      <tr><th>registrationID</th><td><code>{{ ven.registration_id or '-' }}</code></td></tr>
+      <tr><th>Profile / transport</th><td>{{ ven.profile_name or '-' }} / {{ ven.transport_name or '-' }}</td></tr>
+      <tr><th>Pull model / XML signature / report only</th><td>{{ ven.http_pull_model }} / {{ ven.xml_signature }} / {{ ven.report_only }}</td></tr>
+      <tr><th>First / last registered</th><td>{{ ven.first_registered_at|ts }} / {{ ven.last_registered_at|ago }}</td></tr>
+      <tr><th>Last poll</th><td>{{ ven.last_poll_at|ago }} ({{ ven.poll_count }} polls)</td></tr>
+      <tr><th>Samples stored</th><td>{{ ven.sample_count }} &middot; <a href="/api/vens/{{ ven.id }}/samples.csv">CSV (all)</a> &middot; <a href="/api/vens/{{ ven.id }}/samples.csv?minutes=1440">last 24h</a></td></tr>
+    </table>
+    <div class="actions">
+      <form method="post" action="/ui/vens/{{ ven.id }}/request-reregistration" class="inline"><button class="btn">Request re-registration</button></form>
+      <form method="post" action="/ui/vens/{{ ven.id }}/toggle" class="inline"><button class="btn">{{ 'Disable' if ven.enabled else 'Enable' }}</button></form>
+      <form method="post" action="/ui/vens/{{ ven.id }}/delete" class="inline" onsubmit="return confirm('Delete this VEN and all its data?')"><button class="btn danger">Delete</button></form>
+    </div>
+    <form method="post" action="/ui/vens/{{ ven.id }}/notes" class="notes">
+      <textarea name="notes" rows="2" placeholder="Notes (vendor, model, lab setup...)">{{ ven.notes or '' }}</textarea>
+      <button class="btn small">Save notes</button>
+    </form>
+  </div>
+  <div data-live>
+    <h2>Static configuration (x-AHRI_STATIC, Table 5)</h2>
+    <table class="grid small">
+      <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Received</th></tr></thead>
+      <tbody>{% for r in ven.static_rows %}<tr><td title="{{ r.description }}">{{ r.rid }}</td><td>{{ r.value if r.value is not none else '-' }}</td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+    <h2>Latest status (x-AHRI_STATUS, Table 6)</h2>
+    <table class="grid small">
+      <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Sample time</th><th>Received</th></tr></thead>
+      <tbody>{% for r in ven.status_rows %}<tr><td>{{ r.rid }}</td><td><strong>{{ r.value|num }}</strong></td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|time }}</td><td class="muted">{{ r.received_at|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+    <form method="post" action="/ui/vens/{{ ven.id }}/request-report" class="inline">
+      <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
+      <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
+      <input name="granularity_seconds" placeholder="interval s" size="8">
+      <button class="btn">Request report</button>
+    </form>
+  </div>
+</section>
+
+<section data-live>
+  <h2>Telemetry <span class="muted small">last {{ minutes|int }} min &middot;
+    <a href="?minutes=30">30m</a> <a href="?minutes=120">2h</a> <a href="?minutes=480">8h</a> <a href="?minutes=1440">24h</a></span></h2>
+  <div class="charts">
+    {% for key, title, chart in [('power', 'Inst Power (W)' ~ (' - rated ' ~ rated|num ~ ' W' if rated else ''), charts.power), ('state', 'Operational State (0-14)', charts.state), ('override', 'Override State', charts.override)] %}
+    <figure>
+      <figcaption>{{ title }} <span class="muted">[{{ chart.y_min|num }} .. {{ chart.y_max|num }}]</span></figcaption>
+      <svg viewBox="0 0 {{ chart.width or 640 }} {{ chart.height or 120 }}" preserveAspectRatio="none" class="chart">
+        {% if key == 'power' and rated %}
+          {% set h = (chart.height or 120) %}
+          {% for frac, cls in [(0.7, 'gc'), (0.4, 'cc')] %}
+            {% set y = h - 5 - (frac * rated - chart.y_min) / (chart.y_max - chart.y_min) * (h - 10) %}
+            <line x1="5" x2="{{ (chart.width or 640) - 5 }}" y1="{{ y }}" y2="{{ y }}" class="limit {{ cls }}"/>
+          {% endfor %}
+        {% endif %}
+        {% if chart.points %}<polyline points="{{ chart.points }}" />{% else %}<text x="20" y="60" class="muted">no samples in window</text>{% endif %}
+        {% for x, label in chart.labels %}<text x="{{ x }}" y="{{ (chart.height or 120) - 1 }}" class="axis">{{ label }}</text>{% endfor %}
+      </svg>
+    </figure>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="two">
+  <div data-live>
+    <h2>Events</h2>
+    <form method="post" action="/ui/events" class="event-form">
+      <input type="hidden" name="ven_pk" value="{{ ven.id }}">
+      <input type="hidden" name="back" value="/ui/vens/{{ ven.id }}">
+      <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
+      <label>start in <input name="start_offset_seconds" value="0" size="4"> s</label>
+      <label>duration <input name="duration_minutes" value="{{ config.default_event_duration_minutes }}" size="4"> min</label>
+      <label id="payload-label">payload <input name="payload" size="4" placeholder="auto"></label>
+      <label>MITO <input name="mito" size="3" placeholder="deg F"></label>
+      <label title="price multipliers, comma separated (price stream only)">prices <input name="price_multipliers" size="20" placeholder="1.0,1.2,... (price stream)"></label>
+      <label>interval <input name="price_interval_minutes" value="60" size="3"> min</label>
+      <label><input type="checkbox" name="test_event" value="1"> testEvent</label>
+      <input name="vtn_comment" placeholder="vtnComment" size="18">
+      <button class="btn primary">Send event</button>
+    </form>
+    <table class="grid small">
+      <thead><tr><th>Preset</th><th>Start</th><th>Duration</th><th>Signals</th><th>Status</th><th>Responses</th><th></th></tr></thead>
+      <tbody>
+      {% for e in ven.events %}
+        <tr>
+          <td>{{ e.preset_label }}{% if e.test_event %} <span class="tag muted">test</span>{% endif %}<br><code class="small muted">{{ e.event_id[:8] }}</code></td>
+          <td>{{ e.dtstart|time }}</td><td>{{ e.duration_seconds|duration }}</td>
+          <td>{% for s in e.signals %}<div class="small">{{ s.signal_name }}:{{ s.signal_type }} = {% if s.intervals|length == 1 %}{{ s.intervals[0].payload }}{% else %}{{ s.intervals|length }} intervals{% endif %}</div>{% endfor %}</td>
+          <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} <span class="muted">m{{ e.modification_number }}</span>{% endif %}</td>
+          <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }}{% if r.response_code != 200 %} {{ spec.RESPONSE_CODES.get(r.response_code, '') }}{% endif %} <span class="muted">m{{ r.modification_number }} {{ r.received_at|time }}</span></div>{% else %}<span class="muted">no response yet</span>{% endfor %}</td>
+          <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/vens/{{ ven.id }}"><button class="btn small">cancel</button></form>{% endif %}</td>
+        </tr>
+      {% else %}<tr><td colspan="7" class="muted">no events sent yet</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h2>Customer overrides (oadrCreateOpt)</h2>
+    <table class="grid small">
+      <thead><tr><th>Received</th><th>optType</th><th>Reason</th><th>Event</th><th>optID</th><th>Cancelled</th></tr></thead>
+      <tbody>{% for o in ven.opts %}<tr><td>{{ o.received_at|ts }}</td><td><span class="tag {{ o.opt_type|status_class }}">{{ o.opt_type }}</span></td><td>{{ o.opt_reason }}</td><td><code class="small">{{ (o.event_id or '-')[:8] }}</code></td><td><code class="small">{{ o.opt_id[:8] }}</code></td><td>{{ o.cancelled_at|ts if o.cancelled_at else '' }}</td></tr>{% else %}<tr><td colspan="6" class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  <div data-live>
+    <h2>Registered reports</h2>
+    {% for rr in ven.registered_reports if rr.active %}
+      <h3>{{ rr.report_name_raw }} <span class="muted small">specifier {{ rr.report_specifier_id }} &middot; {{ rr.registered_at|ago }}</span>
+        {% if rr.spec_name %}<span class="tag info">{{ rr.spec_name }}</span>{% else %}<span class="tag muted">not an AHRI report</span>{% endif %}</h3>
+      {% if rr.checklist %}
+      <table class="grid small">
+        <thead><tr><th>Table rID</th><th>Offered as</th><th>reportType</th><th>readingType</th><th>units / description</th><th>min..max period</th></tr></thead>
+        <tbody>{% for c in rr.checklist %}
+          <tr class="{{ '' if c.present else 'missing' }}">
+            <td>{% if c.present %}&#10003;{% else %}&#10007;{% endif %} {{ c.rid or '(extra)' }}<div class="muted">{{ c.description }}</div></td>
+            <td>{{ c.r_id or '-' }}</td>
+            <td>{{ c.report_type or '-' }}{% if c.present and c.expected_type and c.report_type|lower != c.expected_type|lower %} <span class="tag warn">exp {{ c.expected_type }}</span>{% endif %}</td>
+            <td>{{ c.reading_type or '-' }}</td>
+            <td>{{ c.unit or '-' }} <span class="muted">{{ c.measurement_description or '' }}</span>{% if c.expected_units %}<div class="muted">table: {{ c.expected_units }}</div>{% endif %}</td>
+            <td>{{ c.min_period|duration if c.min_period else '-' }} .. {{ c.max_period|duration if c.max_period else '-' }}</td>
+          </tr>{% endfor %}</tbody>
+      </table>
+      {% else %}
+      <table class="grid small"><thead><tr><th>rID</th><th>type</th><th>reading</th><th>measurement</th><th>period</th></tr></thead>
+      <tbody>{% for d in rr.descriptions %}<tr><td>{{ d.r_id }}</td><td>{{ d.report_type }}</td><td>{{ d.reading_type }}</td><td>{{ d.measurement_name }} {{ d.measurement_description }} {{ d.measurement_unit }}</td><td>{{ d.min_period_seconds|duration }}..{{ d.max_period_seconds|duration }}</td></tr>{% endfor %}</tbody></table>
+      {% endif %}
+    {% else %}<p class="muted">No reports registered yet.</p>{% endfor %}
+
+    <h2>Report requests</h2>
+    <table class="grid small">
+      <thead><tr><th>Report</th><th>Interval</th><th>Mode</th><th>Status</th><th>Updates</th><th>Requested</th><th>Source</th><th></th></tr></thead>
+      <tbody>{% for r in ven.report_requests %}
+        <tr><td>{{ r.spec_name or r.report_specifier_id }}<br><code class="small muted">{{ r.report_request_id[:8] }}</code></td><td>{{ r.granularity_seconds|duration }}</td><td>{{ 'one shot' if r.one_shot else 'periodic' }}</td>
+            <td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td><td>{{ r.update_count }}{% if r.last_update_at %} <span class="muted">{{ r.last_update_at|ago }}</span>{% endif %}</td><td>{{ r.requested_at|time }}</td><td>{{ r.source }}</td>
+            <td>{% if r.status in ('queued', 'created', 'active') %}<form method="post" action="/ui/vens/{{ ven.id }}/cancel-report"><input type="hidden" name="report_request_id" value="{{ r.report_request_id }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="8" class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+
+    <h2>Findings <a class="small" href="/ui/findings?ven={{ ven.id }}">all</a></h2>
+    <table class="grid small">
+      <tbody>{% for f in ven.findings[:25] %}<tr><td><span class="tag {{ f.severity|status_class }}">{{ f.severity }}</span></td><td><code class="small">{{ f.code }}</code></td><td>{{ f.message }}</td><td class="muted">{{ f.ts|ago }}</td></tr>{% else %}<tr><td class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+
+    <h2>Run a conformance test</h2>
+    <form method="post" action="/ui/runs" class="inline">
+      <input type="hidden" name="ven_pk" value="{{ ven.id }}">
+      <select name="scenario_id">{% for sc in scenarios %}<option value="{{ sc.id }}">{{ sc.title }}</option>{% endfor %}</select>
+      <select name="mode"><option value="cooling">cooling</option><option value="heating">heating</option></select>
+      <button class="btn primary">Start</button> <a class="small" href="/ui/runs?ven={{ ven.id }}">options</a>
+    </form>
+
+    <h2>Recent samples</h2>
+    <table class="grid small">
+      <thead><tr><th>Sample time</th><th>Report</th><th>rID</th><th>Value</th><th>Received</th></tr></thead>
+      <tbody>{% for smp in recent_samples %}<tr><td>{{ smp.ts|time }}</td><td>{{ smp.spec_name or smp.report_specifier_id }}</td><td>{{ smp.r_id }}</td><td>{{ smp.value }}</td><td class="muted">{{ smp.received_at|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

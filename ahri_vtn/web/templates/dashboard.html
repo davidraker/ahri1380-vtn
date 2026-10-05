@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<section class="cards" data-live>
+  <div class="card"><div class="big">{{ counts.vens }}</div><div>VENs</div></div>
+  <div class="card"><div class="big">{{ counts.events_active }}</div><div>live events</div></div>
+  <div class="card"><div class="big">{{ counts.samples }}</div><div>report samples</div></div>
+  <div class="card"><div class="big">{{ counts.messages }}</div><div>messages</div></div>
+  <div class="card {{ 'bad' if counts.violations }}"><div class="big">{{ counts.violations }}</div><div>schema violations</div></div>
+  <div class="card"><div class="big">{{ counts.runs_running }}</div><div>runs in progress</div></div>
+</section>
+
+<section>
+  <h2>VENs</h2>
+  <table class="grid" data-live>
+    <thead><tr><th>Name</th><th>Status</th><th>venID</th><th>Last poll</th><th>Op. state</th><th>Power (W)</th><th>Override</th><th>Rated (W)</th><th>Live events</th><th></th></tr></thead>
+    <tbody>
+    {% for v in vens %}
+      <tr>
+        <td><a href="/ui/vens/{{ v.id }}"><strong>{{ v.ven_name }}</strong></a>{% if not v.enabled %} <span class="tag muted">disabled</span>{% endif %}</td>
+        <td>{% if v.online %}<span class="tag ok">online</span>{% elif v.registered %}<span class="tag warn">silent</span>{% else %}<span class="tag muted">not registered</span>{% endif %}</td>
+        <td><code class="small">{{ v.ven_id or '-' }}</code></td>
+        <td>{{ v.last_poll_at|ago }}</td>
+        <td>{% if v.status['Operational State'] is not none %}{{ v.status['Operational State']|num }} <span class="muted">{{ v.operational_state_name }}</span>{% else %}-{% endif %}</td>
+        <td>{{ v.status['Inst Power']|num }}</td>
+        <td>{% if v.status['Override State'] == 1 %}<span class="tag bad">override</span>{% elif v.status['Override State'] == 0 %}no{% else %}-{% endif %}</td>
+        <td>{{ v.rated_power|num }}</td>
+        <td>{{ v.active_events }}</td>
+        <td><a class="btn small" href="/ui/vens/{{ v.id }}">open</a></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted">No VENs yet. {% if config.auto_accept_unknown_vens %}Unknown VENs are accepted automatically when they register; you can also pre-register one below.{% else %}Add the VEN name below before it registers.{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/ui/vens" class="inline">
+    <input name="ven_name" placeholder="VEN name (oadrVenName)" required>
+    <input name="ven_id" placeholder="fixed venID (optional)">
+    <input name="notes" placeholder="notes (vendor, model, lab bay...)">
+    <button class="btn">Add VEN</button>
+  </form>
+</section>
+
+<section class="two">
+  <div>
+    <h2>Recent events <a class="small" href="/ui/events">all</a></h2>
+    <table class="grid small" data-live>
+      <thead><tr><th>VEN</th><th>Preset</th><th>Start</th><th>Duration</th><th>Status</th><th>Responses</th></tr></thead>
+      <tbody>
+      {% for e in events %}
+        <tr><td>{{ e.ven_name }}</td><td>{{ e.preset_label }}</td><td>{{ e.dtstart|time }}</td><td>{{ e.duration_seconds|duration }}</td>
+            <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span></td>
+            <td>{% for r in e.responses %}<span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }} {{ r.response_code }}{% if r.modification_number %} m{{ r.modification_number }}{% endif %}</span> {% endfor %}</td></tr>
+      {% else %}<tr><td colspan="6" class="muted">none</td></tr>{% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div>
+    <h2>Recent test runs <a class="small" href="/ui/runs">all</a></h2>
+    <table class="grid small" data-live>
+      <thead><tr><th>Run</th><th>VEN</th><th>Status</th><th>Started</th></tr></thead>
+      <tbody>
+      {% for r in runs %}
+        <tr><td><a href="/ui/runs/{{ r.id }}">{{ r.name }}</a></td><td>{{ r.ven_name }}</td><td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td><td>{{ r.started_at|ago }}</td></tr>
+      {% else %}<tr><td colspan="4" class="muted">none</td></tr>{% endfor %}
+      </tbody>
+    </table>
+    <h2>Activity</h2>
+    <ul class="activity small" data-live>
+      {% for ev in recent %}<li><span class="muted">{{ ev.ts|time }}</span> <code>{{ ev.topic }}</code> {{ ev.message_type or ev.spec_name or ev.preset or ev.opt_type or ev.kind or '' }} {% if ev.ven_name %}{{ ev.ven_name }}{% endif %}</li>{% endfor %}
+    </ul>
+  </div>
+</section>
+{% endblock %}

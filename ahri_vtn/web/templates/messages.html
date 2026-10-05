@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Messages{% endblock %}
+{% block content %}
+<h1>Message log <span class="muted small">{{ page.total }} messages</span></h1>
+<form method="get" class="inline">
+  <select name="ven_id"><option value="">any VEN</option>{% for v in vens if v.ven_id %}<option value="{{ v.ven_id }}" {{ 'selected' if filters.ven_id == v.ven_id }}>{{ v.ven_name }}</option>{% endfor %}</select>
+  <select name="type"><option value="">any type</option>{% for t in page.types %}<option value="{{ t }}" {{ 'selected' if filters.type == t }}>{{ t }}</option>{% endfor %}</select>
+  <select name="direction"><option value="">both</option><option value="in" {{ 'selected' if filters.direction == 'in' }}>VEN &rarr; VTN</option><option value="out" {{ 'selected' if filters.direction == 'out' }}>VTN &rarr; VEN</option></select>
+  <label><input type="checkbox" name="violations" value="1" {{ 'checked' if filters.violations }}> schema violations only</label>
+  <button class="btn">Filter</button>
+</form>
+<table class="grid small" data-live>
+  <thead><tr><th>#</th><th>Time</th><th>Dir</th><th>Type</th><th>venID</th><th>Remote</th><th>HTTP</th><th>Size</th><th>Schema</th></tr></thead>
+  <tbody>
+  {% for m in page['items'] %}
+    <tr class="{{ 'bad-row' if m.schema_error }}">
+      <td><a href="/ui/messages/{{ m.id }}">{{ m.id }}</a></td>
+      <td>{{ m.ts|ts }}</td>
+      <td>{% if m.direction == 'in' %}&rarr; VTN{% else %}VTN &rarr;{% endif %}</td>
+      <td><a href="/ui/messages/{{ m.id }}"><code>{{ m.message_type or '(none)' }}</code></a>{% if m.in_reply_to %} <span class="muted">re {{ m.in_reply_to }}</span>{% endif %}</td>
+      <td><code class="small">{{ (m.ven_id or '')[:13] }}</code></td><td class="muted">{{ m.remote or '' }}</td><td>{{ m.http_status or '' }}</td><td class="muted">{{ m.size }}</td>
+      <td>{% if m.schema_error %}<span class="tag bad" title="{{ m.schema_error }}">invalid</span>{% endif %}</td>
+    </tr>
+  {% else %}<tr><td colspan="9" class="muted">no messages</td></tr>{% endfor %}
+  </tbody>
+</table>
+<p class="pager">{% if page.page > 1 %}<a href="?{{ filters|dictsort|map('join', '=')|join('&') }}&page={{ page.page - 1 }}">&larr; newer</a>{% endif %}
+ page {{ page.page }} / {{ page.pages }}
+ {% if page.page < page.pages %}<a href="?{{ filters|dictsort|map('join', '=')|join('&') }}&page={{ page.page + 1 }}">older &rarr;</a>{% endif %}</p>
+{% endblock %}

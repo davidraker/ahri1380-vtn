@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Test runs{% endblock %}
+{% block content %}
+<h1>Conformance test runs</h1>
+<section class="two">
+  <div>
+    <h2>Start a run</h2>
+    <form method="post" action="/ui/runs" class="stack">
+      <label>VEN <select name="ven_pk" required><option value="">choose...</option>{% for v in vens %}<option value="{{ v.id }}" {{ 'selected' if v.id == selected_ven }}>{{ v.ven_name }}{% if not v.registered %} (not registered){% endif %}</option>{% endfor %}</select></label>
+      <label>Scenario <select name="scenario_id" id="scenario">{% for sc in scenarios %}<option value="{{ sc.id }}" {{ 'selected' if sc.id == selected_scenario }} title="{{ sc.description }}">{{ sc.title }} ({{ sc.section }})</option>{% endfor %}</select></label>
+      <label>Mode <select name="mode"><option value="cooling">cooling (95 F, A Full)</option><option value="heating">heating (47 F, H1)</option></select></label>
+      <label>Run name <input name="name" placeholder="optional"></label>
+      <details><summary>Timing parameters (defaults from config)</summary>
+        <div class="params">
+        <label>stabilization s <input name="param_stabilization_seconds" placeholder="{{ config.thresholds.stabilization_seconds }}"></label>
+        <label>sample count <input name="param_sample_count" placeholder="{{ config.thresholds.sample_count }}"></label>
+        <label>sample interval s <input name="param_sample_interval_seconds" placeholder="{{ config.thresholds.sample_interval_seconds }}"></label>
+        <label>response timeout s <input name="param_response_timeout_seconds" placeholder="{{ config.thresholds.event_response_timeout_seconds }}"></label>
+        <label>override timeout s <input name="param_override_timeout_seconds" placeholder="{{ config.thresholds.override_timeout_seconds }}"></label>
+        <label>recovery timeout s <input name="param_recovery_timeout_seconds" placeholder="300"></label>
+        <label>MITO deg F <input name="param_mito" placeholder="3"></label>
+        <label>operator prompts <select name="param_operator_prompts"><option value="1">yes</option><option value="0">no (auto-continue)</option></select></label>
+        </div>
+      </details>
+      <button class="btn primary">Start run</button>
+    </form>
+    <h2>Scenarios</h2>
+    <dl class="scenarios">{% for sc in scenarios %}<dt>{{ sc.title }} <span class="muted small">{{ sc.section }}</span></dt><dd class="small">{{ sc.description }}</dd>{% endfor %}</dl>
+  </div>
+  <div data-live>
+    <h2>Runs</h2>
+    <table class="grid small">
+      <thead><tr><th>#</th><th>Run</th><th>VEN</th><th>Mode</th><th>Status</th><th>Steps</th><th>Started</th><th>Finished</th></tr></thead>
+      <tbody>{% for r in runs %}
+        <tr><td>{{ r.id }}</td><td><a href="/ui/runs/{{ r.id }}">{{ r.name }}</a></td><td>{{ r.ven_name }}</td><td>{{ r.mode }}</td>
+            <td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td>
+            <td>{% for k, n in r.step_counts.items() %}<span class="tag {{ k|status_class }}">{{ n }} {{ k }}</span> {% endfor %}</td>
+            <td>{{ r.started_at|ts }}</td><td>{{ r.finished_at|ts }}</td></tr>
+      {% else %}<tr><td colspan="8" class="muted">no runs yet</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

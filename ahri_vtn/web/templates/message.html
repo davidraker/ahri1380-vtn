@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Message {{ m.id }}{% endblock %}
+{% block content %}
+<h1>Message {{ m.id }} <code>{{ m.message_type }}</code> <span class="muted small">{{ m.ts|ts }} {% if m.direction == 'in' %}VEN &rarr; VTN{% else %}VTN &rarr; VEN{% endif %}</span></h1>
+<p>venID <code>{{ m.ven_id }}</code> &middot; remote {{ m.remote or '-' }} &middot; HTTP {{ m.http_status or '-' }}
+ {% if m.in_reply_to %}&middot; in reply to {{ m.in_reply_to }}{% endif %}
+ {% if m.pair|length > 1 %}&middot; exchange: {% for p in m.pair %}<a href="/ui/messages/{{ p.id }}" class="{{ 'current' if p.id == m.id }}">{{ p.message_type or '(empty)' }}</a>{% if not loop.last %} &harr; {% endif %}{% endfor %}{% endif %}</p>
+{% if m.schema_error %}<div class="flash bad"><strong>XML schema violation:</strong> {{ m.schema_error }}</div>{% endif %}
+<h2>XML</h2>
+<pre class="xml">{{ pretty }}</pre>
+<h2>Parsed payload</h2>
+<pre class="json">{{ m.payload|tojson(indent=2) }}</pre>
+{% endblock %}

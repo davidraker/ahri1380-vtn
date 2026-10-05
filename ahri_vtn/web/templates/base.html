@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}AHRI 1380 VTN{% endblock %} - {{ config.vtn_id }}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/ui/static/app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/ui/">AHRI 1380 VTN <span class="muted">{{ config.vtn_id }}</span></a>
+  <nav>
+    <a href="/ui/" class="{{ 'active' if path == '/ui/' }}">Dashboard</a>
+    <a href="/ui/events" class="{{ 'active' if path.startswith('/ui/events') }}">Events</a>
+    <a href="/ui/runs" class="{{ 'active' if path.startswith('/ui/runs') }}">Test runs</a>
+    <a href="/ui/findings" class="{{ 'active' if path.startswith('/ui/findings') }}">Findings</a>
+    <a href="/ui/messages" class="{{ 'active' if path.startswith('/ui/messages') }}">Messages</a>
+  </nav>
+  <span class="live" id="live-indicator" title="Live updates">&#9679;</span>
+</header>
+<main>
+{% if flash %}<div class="flash {{ flash_kind }}">{{ flash }}</div>{% endif %}
+{% block content %}{% endblock %}
+</main>
+<footer class="muted small">OpenADR endpoint: <code>{{ config.openadr_url }}</code> &middot; schema mode: {{ config.schema_mode }}
+ &middot; poll interval requested: {{ config.requested_poll_freq_seconds }}s &middot; <a href="/api/status">API</a></footer>
+<script src="/ui/static/app.js"></script>
+</body>
+</html>
