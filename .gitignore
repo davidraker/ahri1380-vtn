@@ -10,3 +10,7 @@ __pycache__/
 build/
 dist/
 test_runs/
+
+# local planning notes and site-specific configuration
+planning/
+config.toml
