@@ -23,7 +23,8 @@ Contents
 
 ## 1. Requirements
 
-- Linux, macOS or Windows (WSL recommended) with Python 3.10 or newer.
+- Linux, macOS or Windows (WSL recommended) with Python 3.10 to 3.13. All dependencies install
+  from prebuilt wheels; no compiler or development headers are needed.
 - Network connectivity between the VTN host and the VEN. The VEN polls the VTN over HTTP
   (pull mode), so the VTN host must be reachable from the equipment or from the vendor cloud.
   No inbound connection to the VEN is needed.
@@ -340,5 +341,13 @@ re-register automatically because their venIDs are no longer known.
   started in the past the VEN may treat it as already active; use a start offset.
 - **Scenario waits forever at a prompt.** Prompts need an operator answer on the run page; set
   `operator_prompts` to 0 for unattended dry runs.
+- **`pip install` tries to compile lxml and fails** ("libxml2 and libxslt development packages
+  are not installed" or "Python.h: No such file or directory"). This happens when pip resolves an
+  lxml version that has no prebuilt wheel for your interpreter, typically an old `signxml` pin
+  forcing `lxml<5` on Python 3.13. Make sure the `openleadr-python` submodule is on branch
+  `ahri-1380` (its `setup.py` allows `signxml<6`, which uses current lxml wheels) and run
+  `pip install --upgrade pip` first. If you really need to compile, install the headers:
+  `sudo dnf install python3-devel libxml2-devel libxslt-devel gcc` (Fedora) or
+  `sudo apt install python3-dev libxml2-dev libxslt1-dev build-essential` (Debian/Ubuntu).
 - **Verbose OpenLEADR logging.** The default level hides OpenLEADR's per-message INFO lines;
   pass `--log-level DEBUG` to see every message in the console.
