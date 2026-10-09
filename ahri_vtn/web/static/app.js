@@ -46,3 +46,18 @@
     preset.addEventListener('change', update); update();
   }
 })();
+
+// Target selector: a whole-VEN checkbox implies all of its resources, so disable them while it is checked.
+(function () {
+  document.querySelectorAll('fieldset.targets').forEach(function (fs) {
+    function sync() {
+      fs.querySelectorAll('input[data-ven]').forEach(function (venBox) {
+        fs.querySelectorAll('input[data-res-of="' + venBox.dataset.ven + '"]').forEach(function (resBox) {
+          resBox.disabled = venBox.checked;
+          resBox.parentElement.classList.toggle('disabled', venBox.checked);
+        });
+      });
+    }
+    fs.addEventListener('change', sync); sync();
+  });
+})();

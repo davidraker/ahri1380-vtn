@@ -16,10 +16,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Callable, Optional
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from .. import spec
 from ..db import models
+from ..targets import Selection, Unit, VenTarget
 from ..util import jsonable, utcnow
 
 logger = logging.getLogger("ahri_vtn.conformance")
@@ -133,18 +134,42 @@ class StepContext:
 # ---------------------------------------------------------------------------------------------
 
 class RunContext:
-    def __init__(self, engine: "ConformanceEngine", run_pk: int, scenario: Scenario, ven_pk: int, mode: str,
-                 params: dict):
+    """
+    Everything a scenario needs: the selection of targets (VENs / resources / groups), the
+    units (VEN-resource pairs) whose behaviour must be checked, and helpers to send events,
+    request reports and wait for VEN behaviour. Single-VEN helpers (latest_status, rated_power,
+    ...) operate on the first unit for scenarios that do not care about multiple units.
+    """
+
+    def __init__(self, engine: "ConformanceEngine", run_pk: int, scenario: Scenario, selection: Selection,
+                 mode: str, params: dict):
         self.engine = engine
         self.vtn = engine.vtn
         self.run_pk = run_pk
         self.scenario = scenario
-        self.ven_pk = ven_pk
+        self.selection = selection
+        self.targets: list[VenTarget] = [t for t in selection.resolve(engine.vtn.db) if t.ven_id]
+        self.units: list[Unit] = [u for t in self.targets for u in t.units()]
+        self.ven_pk = self.targets[0].ven_pk if self.targets else None
         self.mode = mode
         self.params = params
         self.step_index = 0
         self.created_event_ids: list[str] = []
+        self.dispatch_pks: list[int] = []
         self.shared: dict = {}      # scratch space shared between steps / sub-scenarios
+
+    @property
+    def multi(self) -> bool:
+        return len(self.units) > 1
+
+    def tag(self, unit: Unit) -> str:
+        """Prefix for per-unit assertion messages when more than one unit is under test."""
+        return f"[{unit.label}] " if self.multi else ""
+
+    def refresh_units(self):
+        """Re-resolve the selection (e.g. after a static report revealed the VEN's resources)."""
+        self.targets = [t for t in self.selection.resolve(self.vtn.db) if t.ven_id]
+        self.units = [u for t in self.targets for u in t.units()]
 
     # ---- parameters / timing
 
@@ -161,15 +186,15 @@ class RunContext:
 
     # ---- VEN state
 
-    def ven(self) -> dict:
-        ven = self.vtn.queries.get_ven(self.ven_pk)
+    def ven(self, ven_pk: Optional[int] = None) -> dict:
+        ven = self.vtn.queries.get_ven(ven_pk or self.ven_pk)
         if ven is None:
             raise RunAborted("VEN was deleted")
         return ven
 
-    def ven_row(self) -> models.Ven:
+    def ven_row(self, ven_pk: Optional[int] = None) -> models.Ven:
         with self.vtn.db.session() as s:
-            ven = s.get(models.Ven, self.ven_pk)
+            ven = s.get(models.Ven, ven_pk or self.ven_pk)
             s.expunge(ven)
             return ven
 
@@ -177,67 +202,133 @@ class RunContext:
     def ven_id(self) -> Optional[str]:
         return self.ven_row().ven_id
 
-    def latest_status(self) -> dict:
-        """{rid name: value} from the VEN's latest status cache."""
-        latest = self.ven_row().latest_status or {}
+    @property
+    def unit(self) -> Unit:
+        return self.units[0]
+
+    # ---- per-unit state
+
+    def _unit_caches(self, unit: Unit):
+        """(latest_status, static_info) dicts for a unit: the resource's, or the VEN's when it has none."""
+        with self.vtn.db.session() as s:
+            if unit.resource_id:
+                res = s.scalar(select(models.Resource).where(models.Resource.ven_pk == unit.ven_pk,
+                                                             models.Resource.resource_id == unit.resource_id))
+                if res is not None:
+                    return dict(res.latest_status or {}), dict(res.static_info or {})
+            ven = s.get(models.Ven, unit.ven_pk)
+            return dict(ven.latest_status or {}), dict(ven.static_info or {})
+
+    def unit_status(self, unit: Unit) -> dict:
+        """{rid name: value} from the unit's latest status cache."""
+        latest, _ = self._unit_caches(unit)
         return {k: v.get("value") for k, v in latest.items()}
 
-    def static_value(self, rid: str):
-        info = self.ven_row().static_info or {}
-        return (info.get(rid) or {}).get("value")
+    def unit_static(self, unit: Unit, rid: str):
+        _, static = self._unit_caches(unit)
+        return (static.get(rid) or {}).get("value")
 
-    def rated_power(self) -> Optional[float]:
-        value = self.static_value("Size")
+    def unit_rated_power(self, unit: Unit) -> Optional[float]:
+        value = self.unit_static(unit, "Size")
         try:
             return float(value) if value is not None else None
         except (TypeError, ValueError):
             return None
 
-    def unloading_type(self) -> Optional[int]:
-        value = self.static_value("Unloading_Type")
+    def unit_unloading_type(self, unit: Unit) -> Optional[int]:
+        value = self.unit_static(unit, "Unloading_Type")
         try:
             return int(float(value)) if value is not None else None
         except (TypeError, ValueError):
             return None
 
+    def unit_samples(self, unit: Unit, rid: str, since: datetime, until: Optional[datetime] = None):
+        return self.vtn.queries.samples(unit.ven_pk, spec_rid=rid, since=since, until=until, limit=10000,
+                                        resource_id=unit.resource_id)
+
+    def unit_samples_received_since(self, unit: Unit, rid: str, since: datetime) -> list[models.ReportSample]:
+        with self.vtn.db.session() as s:
+            q = select(models.ReportSample).where(models.ReportSample.ven_pk == unit.ven_pk,
+                                                  models.ReportSample.spec_rid == rid,
+                                                  models.ReportSample.received_at >= since)
+            if unit.resource_id:
+                q = q.where(models.ReportSample.resource_id == unit.resource_id)
+            return s.scalars(q.order_by(models.ReportSample.received_at)).all()
+
+    def unit_active_status_request(self, unit: Unit) -> Optional[models.ReportRequest]:
+        with self.vtn.db.session() as s:
+            q = select(models.ReportRequest).where(models.ReportRequest.ven_pk == unit.ven_pk,
+                                                   models.ReportRequest.spec_name == spec.STATUS_REPORT.name,
+                                                   models.ReportRequest.one_shot.is_(False),
+                                                   models.ReportRequest.status.in_(("queued", "created", "active")))
+            if unit.resource_id:
+                q = q.where(or_(models.ReportRequest.resource_id == unit.resource_id,
+                                models.ReportRequest.resource_id.is_(None)))
+            return s.scalar(q.order_by(models.ReportRequest.requested_at.desc()))
+
+    def unit_opts_since(self, unit: Unit, since: datetime) -> list[models.Opt]:
+        return [o for o in self.vtn.queries.opts(ven_pk=unit.ven_pk, since=since)
+                if not (unit.resource_id and o.resource_id and o.resource_id != unit.resource_id)]
+
+    # ---- single-unit conveniences (first unit)
+
+    def latest_status(self) -> dict:
+        return self.unit_status(self.unit)
+
+    def static_value(self, rid: str):
+        return self.unit_static(self.unit, rid)
+
+    def rated_power(self) -> Optional[float]:
+        return self.unit_rated_power(self.unit)
+
+    def unloading_type(self) -> Optional[int]:
+        return self.unit_unloading_type(self.unit)
+
     def samples(self, rid: str, since: datetime, until: Optional[datetime] = None) -> list[models.ReportSample]:
-        return self.vtn.queries.samples(self.ven_pk, spec_rid=rid, since=since, until=until, limit=10000)
+        return self.unit_samples(self.unit, rid, since, until)
 
     def samples_received_since(self, rid: str, since: datetime) -> list[models.ReportSample]:
-        with self.vtn.db.session() as s:
-            return s.scalars(select(models.ReportSample)
-                             .where(models.ReportSample.ven_pk == self.ven_pk, models.ReportSample.spec_rid == rid,
-                                    models.ReportSample.received_at >= since)
-                             .order_by(models.ReportSample.received_at)).all()
+        return self.unit_samples_received_since(self.unit, rid, since)
 
     def active_status_request(self) -> Optional[models.ReportRequest]:
-        with self.vtn.db.session() as s:
-            return s.scalar(select(models.ReportRequest)
-                            .where(models.ReportRequest.ven_pk == self.ven_pk,
-                                   models.ReportRequest.spec_name == spec.STATUS_REPORT.name,
-                                   models.ReportRequest.one_shot.is_(False),
-                                   models.ReportRequest.status.in_(("queued", "created", "active")))
-                            .order_by(models.ReportRequest.requested_at.desc()))
+        return self.unit_active_status_request(self.unit)
 
     def event_responses(self, event_id: str) -> list[models.EventResponse]:
         return self.vtn.queries.event_responses(event_id)
 
     def opts_since(self, since: datetime) -> list[models.Opt]:
-        return self.vtn.queries.opts(ven_pk=self.ven_pk, since=since)
+        return self.unit_opts_since(self.unit, since)
 
     # ---- actions
 
-    def create_event(self, preset: str, duration_seconds: float, start_offset_seconds: float = 0, **kwargs) -> str:
+    def dispatch(self, preset: str, duration_seconds: float, start_offset_seconds: float = 0, **kwargs) -> dict:
+        """
+        Send an event to the whole selection (one OpenADR event per VEN). Returns the dispatch
+        dict: {'dispatch_pk', 'events': {ven_pk: event_id}, 'targets': [...]}.
+        """
         start = utcnow() + timedelta(seconds=self.scaled(start_offset_seconds)) if start_offset_seconds else utcnow()
-        event_id = self.vtn.events.create_event(self.ven_pk, preset, start=start,
+        result = self.vtn.events.dispatch_event(self.selection, preset, start=start,
                                                 duration=timedelta(seconds=self.scaled(duration_seconds)),
                                                 source="scenario", test_event=bool(self.p("test_event", False)),
                                                 vtn_comment=f"AHRI 1380 {self.scenario.id} run {self.run_pk}", **kwargs)
-        self.created_event_ids.append(event_id)
-        return event_id
+        self.created_event_ids.extend(result["events"].values())
+        self.dispatch_pks.append(result["dispatch_pk"])
+        return result
+
+    def create_event(self, preset: str, duration_seconds: float, start_offset_seconds: float = 0, **kwargs) -> str:
+        """Single-VEN convenience: dispatch to the selection and return the first VEN's event id."""
+        result = self.dispatch(preset, duration_seconds, start_offset_seconds, **kwargs)
+        return next(iter(result["events"].values()))
 
     def cancel_event(self, event_id: str) -> bool:
         return self.vtn.events.cancel_event(event_id)
+
+    def cancel_dispatch(self, dispatch: dict) -> int:
+        return self.vtn.events.cancel_dispatch(dispatch["dispatch_pk"])
+
+    def request_reports(self, spec_name: str, one_shot: bool = True, test_step_pk: Optional[int] = None) -> dict:
+        return self.vtn.reports.request_reports(self.selection, spec_name, one_shot=one_shot, source="scenario",
+                                                test_step_pk=test_step_pk)
 
     def cleanup_events(self):
         for event_id in self.created_event_ids:
@@ -266,22 +357,37 @@ class RunContext:
                                     timeout=self.scaled(timeout))
         return existing()
 
-    async def wait_samples(self, rid: str, count: int, since: datetime, timeout: float) -> list[models.ReportSample]:
-        """Wait until `count` samples of rid with ts >= since have been received (or timeout)."""
+    async def wait_dispatch_responses(self, dispatch: dict, timeout: float,
+                                      modification_number: Optional[int] = None) -> dict:
+        """Wait for the oadrCreatedEvent of every VEN in a dispatch: {ven_pk: EventResponse or None}."""
+        deadline = asyncio.get_event_loop().time() + self.scaled(timeout)
+        results = {}
+        for ven_pk, event_id in dispatch["events"].items():
+            remaining = max(deadline - asyncio.get_event_loop().time(), 0)
+            results[ven_pk] = await self.wait_event_response(event_id, remaining / max(self.scaled(1), 1e-9),
+                                                             modification_number=modification_number)
+        return results
+
+    async def wait_unit_samples(self, unit: Unit, rid: str, count: int, since: datetime, timeout: float,
+                                received: bool = True) -> list[models.ReportSample]:
+        """Wait until `count` samples of rid for the unit have been received (or sampled) after `since`."""
         deadline = asyncio.get_event_loop().time() + self.scaled(timeout)
         while True:
-            rows = self.samples(rid, since)
+            rows = self.unit_samples_received_since(unit, rid, since) if received else self.unit_samples(unit, rid, since)
             if len(rows) >= count:
                 return rows
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 return rows
-            await self.vtn.bus.wait_for(lambda e: e["topic"] == "report.update" and e.get("ven_pk") == self.ven_pk,
+            await self.vtn.bus.wait_for(lambda e: e["topic"] == "report.update" and e.get("ven_pk") == unit.ven_pk,
                                         timeout=remaining)
 
-    async def wait_status(self, predicate: Callable[[dict], bool], timeout: float) -> Optional[dict]:
-        """Wait for the latest status (dict rid -> value) to satisfy predicate."""
-        status = self.latest_status()
+    async def wait_samples(self, rid: str, count: int, since: datetime, timeout: float) -> list[models.ReportSample]:
+        return await self.wait_unit_samples(self.unit, rid, count, since, timeout, received=False)
+
+    async def wait_unit_status(self, unit: Unit, predicate: Callable[[dict], bool], timeout: float) -> Optional[dict]:
+        """Wait for the unit's latest status (dict rid -> value) to satisfy predicate."""
+        status = self.unit_status(unit)
         if status and predicate(status):
             return status
         deadline = asyncio.get_event_loop().time() + self.scaled(timeout)
@@ -289,23 +395,30 @@ class RunContext:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
                 return None
-            await self.vtn.bus.wait_for(lambda e: e["topic"] == "report.update" and e.get("ven_pk") == self.ven_pk,
+            await self.vtn.bus.wait_for(lambda e: e["topic"] == "report.update" and e.get("ven_pk") == unit.ven_pk,
                                         timeout=remaining)
-            status = self.latest_status()
+            status = self.unit_status(unit)
             if status and predicate(status):
                 return status
 
-    async def wait_opt(self, since: datetime, timeout: float, opt_type: Optional[str] = "optOut") -> Optional[models.Opt]:
+    async def wait_status(self, predicate: Callable[[dict], bool], timeout: float) -> Optional[dict]:
+        return await self.wait_unit_status(self.unit, predicate, timeout)
+
+    async def wait_unit_opt(self, unit: Unit, since: datetime, timeout: float,
+                            opt_type: Optional[str] = "optOut") -> Optional[models.Opt]:
         def existing():
-            for o in self.opts_since(since):
+            for o in self.unit_opts_since(unit, since):
                 if opt_type is None or o.opt_type == opt_type:
                     return o
             return None
         if existing():
             return existing()
-        await self.vtn.bus.wait_for(lambda e: e["topic"] == "opt.created" and e.get("ven_pk") == self.ven_pk
+        await self.vtn.bus.wait_for(lambda e: e["topic"] == "opt.created" and e.get("ven_pk") == unit.ven_pk
                                     and (opt_type is None or e.get("opt_type") == opt_type), timeout=self.scaled(timeout))
         return existing()
+
+    async def wait_opt(self, since: datetime, timeout: float, opt_type: Optional[str] = "optOut") -> Optional[models.Opt]:
+        return await self.wait_unit_opt(self.unit, since, timeout, opt_type)
 
     async def wait_topic(self, predicate: Callable[[dict], bool], timeout: float) -> Optional[dict]:
         return await self.vtn.bus.wait_for(predicate, timeout=self.scaled(timeout))
@@ -368,12 +481,27 @@ class ConformanceEngine:
                 "poll_interval_seconds": self.vtn.config.requested_poll_freq_seconds,
                 "operator_prompts": True, "wattmeter_prompt": True, "test_event": False}
 
-    def start_run(self, scenario_id: str, ven_pk: Optional[int], mode: str = "cooling", params: Optional[dict] = None,
-                  name: Optional[str] = None) -> int:
+    def start_run(self, scenario_id: str, ven_pk: Optional[int] = None, mode: str = "cooling",
+                  params: Optional[dict] = None, name: Optional[str] = None, selection=None) -> int:
+        """
+        Start a scenario against a selection of targets (whole VENs, resources, groups). `ven_pk`
+        is a convenience for "this whole VEN"; `selection` takes a Selection, the wire dict or a
+        list of form values.
+        """
         if scenario_id not in self.scenarios:
             raise ValueError(f"Unknown scenario '{scenario_id}'")
-        if ven_pk is None:
-            raise ValueError("A VEN must be selected")
+        sel = Selection.from_any(selection) if selection is not None else None
+        if (sel is None or sel.is_empty()) and ven_pk is not None:
+            sel = Selection.whole_ven(ven_pk)
+        if sel is None or sel.is_empty():
+            raise ValueError("Select at least one VEN, resource or group")
+        targets = sel.resolve(self.vtn.db)
+        unregistered = [t.ven_name for t in targets if not t.ven_id]
+        if not targets:
+            raise ValueError("The selection contains no VEN")
+        if unregistered:
+            raise ValueError(f"Not registered: {', '.join(unregistered)}")
+        ven_pk = targets[0].ven_pk
         scenario = self.scenarios[scenario_id]
         merged = {**self.default_params(), **scenario.default_params, **(params or {})}
         for key in ("operator_prompts", "wattmeter_prompt", "test_event"):
@@ -381,18 +509,15 @@ class ConformanceEngine:
                 merged[key] = merged[key].strip().lower() in ("1", "true", "yes", "on")
             elif isinstance(merged.get(key), (int, float)):
                 merged[key] = bool(merged[key])
+        target_label = "; ".join(t.describe() for t in targets)
         with self.vtn.db.session() as s:
-            ven = s.get(models.Ven, ven_pk)
-            if ven is None:
-                raise ValueError("Unknown VEN")
-            if not ven.registered or not ven.ven_id:
-                raise ValueError(f"VEN '{ven.ven_name}' is not registered")
-            run = models.TestRun(scenario_id=scenario_id, name=name or f"{scenario.title} - {ven.ven_name}", ven_pk=ven_pk,
+            run = models.TestRun(scenario_id=scenario_id, name=name or f"{scenario.title} - {target_label}",
+                                 ven_pk=ven_pk, selection=sel.as_dict(), resolved=[t.as_dict() for t in targets],
                                  mode=mode, params=jsonable(merged), status="running")
             s.add(run)
             s.flush()
             run_pk = run.id
-        rc = RunContext(self, run_pk, scenario, ven_pk, mode, merged)
+        rc = RunContext(self, run_pk, scenario, sel, mode, merged)
         self._tasks[run_pk] = asyncio.get_event_loop().create_task(self._execute(rc))
         self.vtn.bus.publish("run.started", run_pk=run_pk, scenario_id=scenario_id, ven_pk=ven_pk)
         logger.info(f"Started run {run_pk}: {scenario.title} for VEN {ven_pk} ({mode})")
@@ -467,7 +592,9 @@ class ConformanceEngine:
             run.status = status
             run.finished_at = utcnow()
             run.summary = {"steps": counts, "error": error, "events": rc.created_event_ids,
-                           "rated_power": rc.rated_power(), "unloading_type": rc.unloading_type(), "mode": rc.mode}
+                           "dispatches": rc.dispatch_pks, "mode": rc.mode,
+                           "units": [{"unit": u.label, "rated_power": rc.unit_rated_power(u),
+                                      "unloading_type": rc.unit_unloading_type(u)} for u in rc.units]}
         self.vtn.bus.publish("run.finished", run_pk=rc.run_pk, status=status)
         logger.info(f"Run {rc.run_pk} finished: {status}")
 

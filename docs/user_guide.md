@@ -13,11 +13,12 @@ Contents
 4. Starting the VTN
 5. Connecting the equipment under test
 6. Using the web interface
-7. Running conformance tests
-8. Using the simulated VEN
-9. JSON API reference
-10. Data storage and export
-11. Troubleshooting
+7. Resources, groups and targeting
+8. Running conformance tests
+9. Using the simulated VEN
+10. JSON API reference
+11. Data storage and export
+12. Troubleshooting
 
 ---
 
@@ -187,7 +188,11 @@ values satisfy Section 6.1.8. The event is delivered on the VEN's next poll; the
 (`optIn` / `optOut`, response code, modification number) appears in the Responses column.
 "Cancel" re-sends the event with eventStatus CANCELLED (Section 6.1.7).
 
-**Events** (`/ui/events`): the same form for any VEN plus the full event history.
+**Events** (`/ui/events`): the event form with the full target selector (see section 7) and the
+dispatch history: one row per operator action, listing the OpenADR event sent to each VEN with
+its target, status and responses, and a "cancel all" button.
+
+**Groups** (`/ui/groups`): create, edit and delete saved target groups (section 7).
 
 **Messages** (`/ui/messages`): every message in both directions with time, type, venID,
 remote address, HTTP status and a schema-violation marker. Filter by VEN, type, direction or
@@ -199,11 +204,44 @@ paired request / response.
 
 **Test runs** (`/ui/runs`): start and follow conformance runs (next section).
 
-## 7. Running conformance tests
+## 7. Resources, groups and targeting
 
-Open **Test runs**, choose the VEN, a scenario and the mode (cooling or heating per the lab
-conditions), optionally change the timing parameters, and press Start. The run page lists each
-step with its assertions as they complete.
+A VEN may represent one HVAC unit or a whole fleet (for example a manufacturer cloud). The tool
+discovers the *resources* behind a VEN from the `reportDataSource/resourceID` of the reports it
+registers, keeps per-resource status and static values, and lists them on the VEN page. Each
+resource has its own page (`/ui/vens/<id>/resources/<resourceID>`) with charts, samples, the
+events that affected it (targeted at it or at the whole VEN), its overrides and its reports, plus
+a label and notes field.
+
+**Targets.** Events, report requests and test runs all take a *selection*: any mix of whole VENs,
+individual resources and saved groups, across several VENs. The default is the whole VEN you
+launched from. In the forms the selector lists every VEN with its resources nested beneath it;
+ticking a VEN addresses all of its units, ticking resources addresses just those.
+
+- For events, one OpenADR event is created per targeted VEN. Its `eiTarget` carries the `venID`
+  for a whole VEN or the chosen `resourceID`s for specific units. The events of one action are
+  grouped as a *dispatch* on the Events page and can be cancelled together.
+- For report requests, a whole VEN gets every registered report of the chosen type (one per unit
+  on a fleet VEN); selected resources get only the reports covering them.
+- For test runs, response checks are made per VEN and state, power, override and static checks
+  per unit, each tagged with the unit name; a step fails if any unit fails.
+
+**Groups.** A group is a saved selection with a name (for example "Bay 3 units"). Optionally give
+it an OpenADR `groupID`: events to whole-VEN members then also carry `eiTarget/groupID`, which a
+VEN configured with that id may honour (2.0b does not require it). Members that are individual
+resources are addressed by `resourceID` only, because a groupID applies to everything a VEN
+controls.
+
+Note that OpenADR 2.0b does not require VENs to filter on `resourceID`, and the AHRI draft does
+not mention resources at all. If a vendor's fleet VEN ignores resource targets, the practical
+alternative is a dedicated test VEN containing only the unit under test.
+
+## 8. Running conformance tests
+
+Open **Test runs**, choose the targets (a whole VEN, specific resources or a group), a scenario
+and the mode (cooling or heating per the lab conditions), optionally change the timing
+parameters, and press Start. The run page lists each step with its assertions as they complete;
+with several units under test the assertions are prefixed with the unit name.
 
 Scenarios:
 
@@ -248,7 +286,7 @@ hours of equipment time.
 Results are kept in the database and can be downloaded as JSON from the run page
 (`/api/runs/<id>/report.json`). Operator notes can be added to any run.
 
-## 8. Using the simulated VEN
+## 9. Using the simulated VEN
 
 The simulator is useful to learn the tool, to rehearse a test sequence, and to check the VTN
 installation before equipment arrives.
@@ -257,7 +295,9 @@ installation before equipment arrives.
 python -m sim_ven.ahri_sim_ven --vtn-url http://localhost:8080/OpenADR2/Simple/2.0b --name sim-hvac
 ```
 
-Options: `--rated-power 4800`, `--device-type 0|1`, `--unloading-type 0|1` (1 simulates a
+Options: `--resources hvac-1,hvac-2,hvac-3` (a fleet VEN with several units, each registering
+its own reports and honouring `resourceID` and `groupID` targets), `--group-ids lab-a` (groupIDs
+the VEN belongs to), `--rated-power 4800`, `--device-type 0|1`, `--unloading-type 0|1` (1 simulates a
 two-capacity unit that NAKs Critical Curtailment with 460), `--mode cooling|heating`,
 `--status-interval 60`, `--text-mode payload|description` (how the ASCII items are sent),
 `--report-name-style x-|telemetry` (register the status report as `x-AHRI_STATUS` or as
@@ -267,13 +307,14 @@ thermostat demand), `--control-port 9090`.
 With a control port enabled:
 
 ```bash
-curl -X POST localhost:9090/override         # customer override (oadrCreateOpt optOut)
+curl -X POST localhost:9090/override                  # customer override (oadrCreateOpt optOut)
+curl -X POST -d resource=hvac-2 localhost:9090/override   # on one unit of a fleet VEN
 curl -X POST localhost:9090/clear-override
 curl -X POST -d running=false localhost:9090/set
 curl localhost:9090/state
 ```
 
-## 9. JSON API reference
+## 10. JSON API reference
 
 Everything the UI does is available under `/api`. Responses are JSON; POST bodies may be JSON
 or form-encoded.
@@ -290,12 +331,17 @@ or form-encoded.
 | `POST /api/vens/{id}/request-reregistration` | Queue `oadrRequestReregistration`. |
 | `GET /api/vens/{id}/samples` and `/samples.csv` | Samples; filters `rid`, `since`, `until`, `minutes`, `limit`. |
 | `GET /api/vens/{id}/series?minutes=120` | Status time series for charts. |
-| `GET /api/events`, `POST /api/events` | List events; create one (`ven_pk`, `preset`, `start` or `start_offset_seconds`, `duration_seconds` or `duration_minutes`, `payload`, `mito`, `price_multipliers`, `price_interval_minutes`, `test_event`, `vtn_comment`). |
+| `GET /api/events`, `POST /api/events` | List events (filters `ven`, `resource`); dispatch one to a selection (`selection` object, or `targets` list such as `["ven:3", "res:4:hvac-1", "group:2"]`, or `ven_pk` with optional `resource_ids`; plus `preset`, `start` or `start_offset_seconds`, `duration_seconds` or `duration_minutes`, `payload`, `mito`, `price_multipliers`, `price_interval_minutes`, `test_event`, `vtn_comment`). Returns the dispatch id and the event id per VEN. |
+| `GET /api/dispatches`, `GET /api/dispatches/{id}`, `POST /api/dispatches/{id}/cancel` | Dispatch history with per-VEN events and responses; cancel every live event of a dispatch. |
+| `GET /api/vens/{id}/resources`, `GET`/`PATCH /api/vens/{id}/resources/{resourceID}` | Resources of a VEN with latest status; detail; set `label` / `notes`. |
+| `GET /api/targets` | VENs with their resources and the saved groups, for building selections. |
+| `GET`/`POST /api/groups`, `GET`/`PUT`/`DELETE /api/groups/{id}` | Saved groups (`name`, `description`, `signal_group_id`, `selection`). |
+| `POST /api/report-requests` | Request a report type (`spec_name`) for a selection; `one_shot`, `granularity_seconds`. |
 | `GET /api/events/{event_id}`, `POST /api/events/{event_id}/cancel` | Event detail with responses; cancel. |
 | `GET /api/messages`, `GET /api/messages/{id}` | Message log (filters `ven_id`, `type`, `direction`, `violations`, `page`) and raw XML. |
 | `GET /api/findings?ven=&run=` | Findings. |
 | `GET /api/scenarios` | Available scenarios with default parameters. |
-| `GET /api/runs`, `POST /api/runs` | List runs; start one (`scenario_id`, `ven_pk`, `mode`, `params` object). |
+| `GET /api/runs`, `POST /api/runs` | List runs; start one (`scenario_id`, a selection as for events, `mode`, `params` object). |
 | `GET /api/runs/{id}`, `GET /api/runs/{id}/report.json` | Run detail and downloadable report. |
 | `POST /api/runs/{id}/abort`, `POST /api/runs/{id}/respond` | Abort; answer a prompt (`answer`, optional `note`). |
 | `GET /api/stream` | Server-sent events for live updates. |
@@ -307,21 +353,21 @@ curl -X POST localhost:8080/api/events -H 'content-type: application/json' \
   -d '{"ven_pk": 1, "preset": "general_curtailment", "duration_minutes": 45, "mito": 3}'
 ```
 
-## 10. Data storage and export
+## 11. Data storage and export
 
 All data lives in the configured database (default `ahri_vtn.sqlite` in the working
 directory). Main tables: `vens`, `registration_events`, `registered_reports`,
 `report_descriptions`, `report_requests`, `report_samples` (one row per rID per interval, with
 numeric or text value, confidence, accuracy, data quality and a link to the raw message),
-`events`, `event_responses`, `opts`, `messages` (raw XML in and out, paired), `test_runs`,
-`test_steps` and `findings`.
+`resources`, `groups`, `group_members`, `dispatches`, `events`, `event_responses`, `opts`,
+`messages` (raw XML in and out, paired), `test_runs`, `test_steps` and `findings`.
 
 Exports: CSV of samples from the VEN page or `/api/vens/{id}/samples.csv`, JSON run reports,
 and the SQLite file itself (copy it while the VTN is stopped, or use `sqlite3 .backup`). To
 start a clean test campaign, stop the VTN and move the SQLite file aside; VENs will be asked to
 re-register automatically because their venIDs are no longer known.
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 - **VEN never appears.** Confirm the VEN can reach `http://<vtn-host>:8080/OpenADR2/Simple/2.0b`
   (for example `curl -X POST` to it returns HTTP 400 "Content-Type header must be

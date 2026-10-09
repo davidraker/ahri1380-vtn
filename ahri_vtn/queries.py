@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, or_, select
 
 from . import spec
 from .db import models
@@ -31,7 +31,131 @@ class Queries:
         op_state = status.get("Operational State")
         return {**ven.as_dict(), "online": online, "status": status, "status_ts": status_ts,
                 "operational_state_name": spec.operational_state_name(op_state) if op_state is not None else None,
-                "rated_power": ((ven.static_info or {}).get("Size") or {}).get("value")}
+                "rated_power": ((ven.static_info or {}).get("Size") or {}).get("value"),
+                "resource_count": len(ven.resources),
+                "resource_ids": sorted(r.resource_id for r in ven.resources)}
+
+    # ------------------------------------------------------------------ resources
+
+    def resource_summary(self, res: models.Resource, now: Optional[datetime] = None) -> dict:
+        now = now or utcnow()
+        latest = res.latest_status or {}
+        status = {k: latest.get(k, {}).get("value") for k in ("Inst Power", "Operational State", "Override State")}
+        op_state = status.get("Operational State")
+        stale_after = timedelta(seconds=self.vtn.config.status_report_interval_seconds * 3 + 30)
+        return {**res.as_dict(), "status": status,
+                "status_ts": max((v.get("received_at") or "" for v in latest.values()), default=None),
+                "reporting": bool(res.last_seen_at and now - res.last_seen_at <= stale_after),
+                "operational_state_name": spec.operational_state_name(op_state) if op_state is not None else None,
+                "rated_power": ((res.static_info or {}).get("Size") or {}).get("value"),
+                "unloading_type": ((res.static_info or {}).get("Unloading_Type") or {}).get("value")}
+
+    @staticmethod
+    def _event_covers(ev: models.Event, resource_id: Optional[str]) -> bool:
+        if resource_id is None:
+            return True
+        return ev.target_resource_ids is None or resource_id in ev.target_resource_ids
+
+    def list_resources(self, ven_pk: int) -> list[dict]:
+        with self.vtn.db.session() as s:
+            now = utcnow()
+            live = s.scalars(select(models.Event).where(models.Event.ven_pk == ven_pk,
+                                                        models.Event.status.in_(("far", "near", "active")))).all()
+            result = []
+            for res in s.scalars(select(models.Resource).where(models.Resource.ven_pk == ven_pk)
+                                 .order_by(models.Resource.resource_id)):
+                item = self.resource_summary(res, now)
+                item["active_events"] = sum(1 for e in live if self._event_covers(e, res.resource_id))
+                result.append(item)
+            return result
+
+    def get_resource(self, ven_pk: int, resource_id: str) -> Optional[dict]:
+        with self.vtn.db.session() as s:
+            res = s.scalar(select(models.Resource).where(models.Resource.ven_pk == ven_pk,
+                                                         models.Resource.resource_id == resource_id))
+            if res is None:
+                return None
+            item = self.resource_summary(res)
+            ven = s.get(models.Ven, ven_pk)
+            item["ven_name"] = ven.ven_name if ven else None
+            item["ven"] = self.ven_summary(ven) if ven else None
+            item["static_rows"] = self._rows(spec.STATIC_REPORT, res.static_info or {}, ts_key="received_at")
+            item["status_rows"] = self._rows(spec.STATUS_REPORT, res.latest_status or {}, ts_key="ts")
+            reports = []
+            for rr in s.scalars(select(models.RegisteredReport).where(models.RegisteredReport.ven_pk == ven_pk,
+                                                                     models.RegisteredReport.active.is_(True))):
+                if any(d.resource_id == resource_id for d in rr.descriptions):
+                    r = rr.as_dict()
+                    r["descriptions"] = [d.as_dict() for d in rr.descriptions]
+                    rspec = spec.REPORTS.get(rr.spec_name)
+                    r["checklist"] = self.report_checklist(rspec, rr) if rspec else None
+                    reports.append(r)
+            item["registered_reports"] = reports
+            item["report_requests"] = [r.as_dict() for r in s.scalars(
+                select(models.ReportRequest).where(models.ReportRequest.ven_pk == ven_pk,
+                                                   or_(models.ReportRequest.resource_id == resource_id,
+                                                       models.ReportRequest.resource_id.is_(None)))
+                .order_by(desc(models.ReportRequest.requested_at)).limit(50))]
+            item["events"] = self._events_for(s, ven_pk, limit=30, resource_id=resource_id)
+            item["opts"] = [o.as_dict() for o in s.scalars(
+                select(models.Opt).where(models.Opt.ven_pk == ven_pk,
+                                         or_(models.Opt.resource_id == resource_id, models.Opt.resource_id.is_(None)))
+                .order_by(desc(models.Opt.received_at)).limit(30))]
+            item["sample_count"] = s.scalar(select(func.count(models.ReportSample.id))
+                                            .where(models.ReportSample.ven_pk == ven_pk,
+                                                   models.ReportSample.resource_id == resource_id))
+            item["groups"] = [g.name for g in s.scalars(select(models.Group)
+                                                      .join(models.GroupMember)
+                                                      .where(models.GroupMember.ven_pk == ven_pk,
+                                                             or_(models.GroupMember.resource_id == resource_id,
+                                                                 models.GroupMember.resource_id.is_(None))))]
+            return item
+
+    def update_resource(self, ven_pk: int, resource_id: str, **fields) -> bool:
+        with self.vtn.db.session() as s:
+            res = s.scalar(select(models.Resource).where(models.Resource.ven_pk == ven_pk,
+                                                         models.Resource.resource_id == resource_id))
+            if res is None:
+                return False
+            for key in ("label", "notes"):
+                if key in fields:
+                    setattr(res, key, fields[key])
+        return True
+
+    def selector_tree(self) -> dict:
+        """VENs with their resources, plus groups, for the target selector widget."""
+        with self.vtn.db.session() as s:
+            vens = []
+            for ven in s.scalars(select(models.Ven).order_by(models.Ven.ven_name)):
+                vens.append({"ven_pk": ven.id, "ven_name": ven.ven_name, "registered": ven.registered,
+                             "resources": sorted(r.resource_id for r in ven.resources)})
+        return {"vens": vens, "groups": self.vtn.groups.list_groups()}
+
+    # ------------------------------------------------------------------ dispatches
+
+    def _dispatch_dict(self, s, d: models.Dispatch) -> dict:
+        item = d.as_dict()
+        item["events"] = []
+        for ev in sorted(d.events, key=lambda e: e.id):
+            item["events"].append(self._event_dict(s, ev))
+        item["live"] = any(e["status"] in ("far", "near", "active") for e in item["events"])
+        item["targets"] = ", ".join(
+            f"{t['ven_name']}" + ("" if t.get("resource_ids") is None else f" [{', '.join(t['resource_ids'])}]")
+            + (f" group {','.join(t['group_ids'])}" if t.get("group_ids") else "")
+            for t in (d.resolved or []))
+        item["preset_label"] = spec.EVENT_PRESETS[d.preset].label if d.preset in spec.EVENT_PRESETS else d.preset
+        return item
+
+    def list_dispatches(self, limit: int = 100, kind: str = "event") -> list[dict]:
+        with self.vtn.db.session() as s:
+            return [self._dispatch_dict(s, d) for d in s.scalars(
+                select(models.Dispatch).where(models.Dispatch.kind == kind)
+                .order_by(desc(models.Dispatch.created_at)).limit(limit))]
+
+    def get_dispatch(self, dispatch_pk: int) -> Optional[dict]:
+        with self.vtn.db.session() as s:
+            d = s.get(models.Dispatch, dispatch_pk)
+            return self._dispatch_dict(s, d) if d else None
 
     def list_vens(self) -> list[dict]:
         with self.vtn.db.session() as s:
@@ -72,6 +196,7 @@ class Queries:
                 select(models.Opt).where(models.Opt.ven_pk == ven.id).order_by(desc(models.Opt.received_at)).limit(30))]
             summary["static_rows"] = self.static_rows(ven)
             summary["status_rows"] = self.status_rows(ven)
+            summary["resources"] = self.list_resources(ven.id)
             summary["sample_count"] = s.scalar(select(func.count(models.ReportSample.id))
                                                .where(models.ReportSample.ven_pk == ven.id))
             return summary
@@ -109,37 +234,32 @@ class Queries:
         return rows
 
     @staticmethod
-    def static_rows(ven: models.Ven) -> list[dict]:
-        info = ven.static_info or {}
+    def _rows(rspec: spec.ReportSpec, info: dict, ts_key: str = "ts") -> list[dict]:
         rows = []
-        for rid in spec.STATIC_REPORT.rids:
+        for rid in rspec.rids:
             entry = info.get(rid.name)
             rows.append({"rid": rid.name, "description": rid.description,
                          "value": entry.get("value") if entry else None,
                          "meaning": rid.describe_value(entry.get("value")) if entry and rid.enum else None,
-                         "ts": entry.get("received_at") if entry else None})
-        return rows
-
-    @staticmethod
-    def status_rows(ven: models.Ven) -> list[dict]:
-        info = ven.latest_status or {}
-        rows = []
-        for rid in spec.STATUS_REPORT.rids:
-            entry = info.get(rid.name)
-            rows.append({"rid": rid.name, "description": rid.description,
-                         "value": entry.get("value") if entry else None,
-                         "meaning": rid.describe_value(entry.get("value")) if entry and rid.enum else None,
-                         "ts": entry.get("ts") if entry else None,
+                         "ts": entry.get(ts_key) if entry else None,
                          "received_at": entry.get("received_at") if entry else None})
         return rows
+
+    def static_rows(self, ven: models.Ven) -> list[dict]:
+        return self._rows(spec.STATIC_REPORT, ven.static_info or {}, ts_key="received_at")
+
+    def status_rows(self, ven: models.Ven) -> list[dict]:
+        return self._rows(spec.STATUS_REPORT, ven.latest_status or {}, ts_key="ts")
 
     # ------------------------------------------------------------------ samples
 
     def samples(self, ven_pk: int, spec_rid: Optional[str] = None, r_key: Optional[str] = None,
                 since: Optional[datetime] = None, until: Optional[datetime] = None, limit: int = 2000,
-                order: str = "asc") -> list[models.ReportSample]:
+                order: str = "asc", resource_id: Optional[str] = None) -> list[models.ReportSample]:
         with self.vtn.db.session() as s:
             q = select(models.ReportSample).where(models.ReportSample.ven_pk == ven_pk)
+            if resource_id:
+                q = q.where(models.ReportSample.resource_id == resource_id)
             if spec_rid:
                 q = q.where(models.ReportSample.spec_rid == spec_rid)
             if r_key:
@@ -151,10 +271,11 @@ class Queries:
             q = q.order_by(models.ReportSample.ts.asc() if order == "asc" else models.ReportSample.ts.desc()).limit(limit)
             return s.scalars(q).all()
 
-    def status_series(self, ven_pk: int, since: datetime, until: Optional[datetime] = None) -> dict:
+    def status_series(self, ven_pk: int, since: datetime, until: Optional[datetime] = None,
+                      resource_id: Optional[str] = None) -> dict:
         """Time series of the three status rIDs as {rid: [(ts, value), ...]}."""
         series = {rid.name: [] for rid in spec.STATUS_REPORT.rids}
-        for sample in self.samples(ven_pk, since=since, until=until, limit=20000):
+        for sample in self.samples(ven_pk, since=since, until=until, limit=20000, resource_id=resource_id):
             if sample.spec_rid in series:
                 series[sample.spec_rid].append((sample.ts, sample.value))
         return series
@@ -165,8 +286,18 @@ class Queries:
 
     # ------------------------------------------------------------------ events / opts
 
+    def _event_dict(self, s, ev: models.Event) -> dict:
+        item = ev.as_dict()
+        item["dtend"] = ev.dtend.isoformat()
+        item["responses"] = [r.as_dict() for r in sorted(ev.responses, key=lambda r: r.received_at)]
+        ven = s.get(models.Ven, ev.ven_pk)
+        item["ven_name"] = ven.ven_name if ven else None
+        item["preset_label"] = spec.EVENT_PRESETS[ev.preset].label if ev.preset in spec.EVENT_PRESETS else ev.preset
+        item["target_label"] = "whole VEN" if ev.target_resource_ids is None else ", ".join(ev.target_resource_ids)
+        return item
+
     def _events_for(self, s, ven_pk: Optional[int], limit: int = 100, status: Optional[str] = None,
-                    event_id: Optional[str] = None) -> list[dict]:
+                    event_id: Optional[str] = None, resource_id: Optional[str] = None) -> list[dict]:
         q = select(models.Event)
         if ven_pk is not None:
             q = q.where(models.Event.ven_pk == ven_pk)
@@ -174,21 +305,20 @@ class Queries:
             q = q.where(models.Event.status == status)
         if event_id:
             q = q.where(models.Event.event_id == event_id)
-        q = q.order_by(desc(models.Event.created_at)).limit(limit)
+        q = q.order_by(desc(models.Event.created_at)).limit(limit if resource_id is None else limit * 5)
         result = []
         for ev in s.scalars(q):
-            item = ev.as_dict()
-            item["dtend"] = ev.dtend.isoformat()
-            item["responses"] = [r.as_dict() for r in sorted(ev.responses, key=lambda r: r.received_at)]
-            ven = s.get(models.Ven, ev.ven_pk)
-            item["ven_name"] = ven.ven_name if ven else None
-            item["preset_label"] = spec.EVENT_PRESETS[ev.preset].label if ev.preset in spec.EVENT_PRESETS else ev.preset
-            result.append(item)
+            if resource_id is not None and not self._event_covers(ev, resource_id):
+                continue
+            result.append(self._event_dict(s, ev))
+            if len(result) >= limit:
+                break
         return result
 
-    def list_events(self, ven_pk: Optional[int] = None, limit: int = 100, status: Optional[str] = None) -> list[dict]:
+    def list_events(self, ven_pk: Optional[int] = None, limit: int = 100, status: Optional[str] = None,
+                    resource_id: Optional[str] = None) -> list[dict]:
         with self.vtn.db.session() as s:
-            return self._events_for(s, ven_pk, limit, status)
+            return self._events_for(s, ven_pk, limit, status, resource_id=resource_id)
 
     def get_event(self, event_id: str) -> Optional[dict]:
         with self.vtn.db.session() as s:
@@ -269,6 +399,7 @@ class Queries:
                 item = run.as_dict()
                 ven = s.get(models.Ven, run.ven_pk) if run.ven_pk else None
                 item["ven_name"] = ven.ven_name if ven else None
+                item["target_label"] = self._resolved_label(run.resolved)
                 item["step_counts"] = {}
                 for step in run.steps:
                     item["step_counts"][step.status] = item["step_counts"].get(step.status, 0) + 1
@@ -283,10 +414,18 @@ class Queries:
             item = run.as_dict()
             ven = s.get(models.Ven, run.ven_pk) if run.ven_pk else None
             item["ven_name"] = ven.ven_name if ven else None
+            item["target_label"] = self._resolved_label(run.resolved)
             item["steps"] = [st.as_dict() for st in run.steps]
             item["findings"] = [f.as_dict() for f in s.scalars(
                 select(models.Finding).where(models.Finding.run_pk == run.id).order_by(models.Finding.ts))]
             return item
+
+    @staticmethod
+    def _resolved_label(resolved) -> str:
+        if not resolved:
+            return "-"
+        return "; ".join(f"{t['ven_name']}" + (" (whole VEN)" if t.get("resource_ids") is None
+                                               else f": {', '.join(t['resource_ids'])}") for t in resolved)
 
     def dashboard_counts(self) -> dict:
         with self.vtn.db.session() as s:

@@ -13,6 +13,7 @@ from openleadr import OpenADRServer
 from .bus import LiveBus
 from .config import Config
 from .db import Database
+from .groups import GroupManager
 from .handlers import EventManager, MessageLogger, RegistrationHandler, ReportHandler
 from .queries import Queries
 from .util import fire_and_forget
@@ -32,6 +33,7 @@ class AhriVtn:
         self.events = EventManager(self)
         self.messages = MessageLogger(self)
         self.queries = Queries(self)
+        self.groups = GroupManager(self)
 
         tls = config.tls
         self.server = OpenADRServer(

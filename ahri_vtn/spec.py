@@ -1,7 +1,7 @@
 """
 AHRI Standard 1380-202x (draft) OpenADR 2.0b profile, expressed as data.
 
-Sources (page numbers refer to docs/AHRI_1380-202x_draft.pdf):
+Sources (page numbers refer to the AHRI Standard 1380-202x draft, available from AHRI):
 - Table 4 "Communication and Discovery with OpenADR 2.0" (p.37-39)
 - Table 5 "OpenADR 2.0 Static of Configuration Report" x-AHRI_STATIC (p.39-40)
 - Table 6 "Status Data Reported in a TELEMETRY (STATUS) Report" x-AHRI_STATUS (p.41)

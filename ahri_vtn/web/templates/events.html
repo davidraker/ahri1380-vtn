@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% from "_targets.html" import target_selector %}
 {% block title %}Events{% endblock %}
 {% block content %}
 <h1>Events</h1>
 <form method="post" action="/ui/events" class="event-form">
   <input type="hidden" name="back" value="/ui/events">
-  <select name="ven_pk" required><option value="">VEN...</option>{% for v in vens %}<option value="{{ v.id }}" {{ 'selected' if v.id == selected_ven }}>{{ v.ven_name }}{% if not v.registered %} (not registered){% endif %}</option>{% endfor %}</select>
-  <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
+  {{ target_selector(tree, selected) }}
+  <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
   <label>start in <input name="start_offset_seconds" value="0" size="4"> s</label>
   <label>duration <input name="duration_minutes" value="{{ config.default_event_duration_minutes }}" size="4"> min</label>
   <label>payload <input name="payload" size="4" placeholder="auto"></label>
@@ -16,24 +17,47 @@
   <input name="vtn_comment" placeholder="vtnComment" size="18">
   <button class="btn primary">Send event</button>
 </form>
+<form method="post" action="/ui/report-requests" class="inline">
+  <input type="hidden" name="back" value="/ui/events">
+  <span class="muted small">Request a report for the same targets (uses the selection above when submitted together; otherwise choose below):</span>
+  <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
+  <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
+  <input name="granularity_seconds" placeholder="interval s" size="8">
+  <select name="group_pk"><option value="">targets: pick a group...</option>{% for g in tree.groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>
+  <select name="ven_pk"><option value="">...or a whole VEN</option>{% for v in tree.vens %}<option value="{{ v.ven_pk }}">{{ v.ven_name }}</option>{% endfor %}</select>
+  <button class="btn">Request report</button>
+</form>
 <p class="muted small">Table 8: SIMPLE level 1 = General Curtailment (70 %), 2 = Critical Curtailment (40 %, two-capacity units NAK 460), 3 = Full Curtailment / off.
-LOAD_CONTROL:x-loadControlLevelOffset carries the Maximum Indoor Temperature Offset (&le; 4 F). ELECTRICITY_PRICE:priceMultiplier needs &ge; 25 intervals. Cancelling re-sends the event with eventStatus CANCELLED.</p>
+LOAD_CONTROL:x-loadControlLevelOffset carries the Maximum Indoor Temperature Offset (&le; 4 F). ELECTRICITY_PRICE:priceMultiplier needs &ge; 25 intervals.
+One OpenADR event is sent per targeted VEN; its eiTarget names the VEN, the selected resources, and the groupID of any group that signals one. Cancelling re-sends the event with eventStatus CANCELLED.</p>
+
+<h2>Dispatches</h2>
 <table class="grid small" data-live>
-  <thead><tr><th>VEN</th><th>Preset</th><th>Event</th><th>Start</th><th>End</th><th>Signals</th><th>Status</th><th>Responses</th><th>Source</th><th></th></tr></thead>
+  <thead><tr><th>#</th><th>Preset</th><th>Targets</th><th>Created</th><th>Per-VEN events and responses</th><th>Source</th><th></th></tr></thead>
   <tbody>
-  {% for e in events %}
+  {% for d in dispatches %}
     <tr>
-      <td><a href="/ui/vens/{{ e.ven_pk }}">{{ e.ven_name }}</a></td>
-      <td>{{ e.preset_label }}{% if e.test_event %} <span class="tag muted">test</span>{% endif %}</td>
-      <td><code class="small">{{ e.event_id[:8] }}</code></td>
-      <td>{{ e.dtstart|ts }}</td><td>{{ e.dtend|time }}</td>
-      <td>{% for s in e.signals %}<div>{{ s.signal_name }}:{{ s.signal_type }} = {% if s.intervals|length == 1 %}{{ s.intervals[0].payload }}{% else %}{{ s.intervals|length }} intervals{% endif %}</div>{% endfor %}</td>
-      <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} m{{ e.modification_number }}{% endif %}</td>
-      <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }} <span class="muted">m{{ r.modification_number }} {{ r.received_at|time }}</span></div>{% else %}<span class="muted">-</span>{% endfor %}</td>
-      <td>{{ e.source }}</td>
-      <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel</button></form>{% endif %}</td>
+      <td>{{ d.id }}</td>
+      <td>{{ d.preset_label }}{% if d.label and d.label != d.preset_label %}<br><span class="muted">{{ d.label }}</span>{% endif %}</td>
+      <td>{{ d.targets }}</td>
+      <td>{{ d.created_at|ts }}</td>
+      <td>{% for e in d.events %}
+          <div><a href="/ui/vens/{{ e.ven_pk }}">{{ e.ven_name }}</a> <span class="muted">({{ e.target_label }})</span> <code class="small">{{ e.event_id[:8] }}</code>
+            <span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} m{{ e.modification_number }}{% endif %}
+            {% for r in e.responses %}<span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }} {{ r.response_code }} m{{ r.modification_number }}</span>{% else %}<span class="muted">no response</span>{% endfor %}
+            {% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel" class="inline-form"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel</button></form>{% endif %}
+          </div>{% endfor %}</td>
+      <td>{{ d.source }}</td>
+      <td>{% if d.live %}<form method="post" action="/ui/dispatches/{{ d.id }}/cancel"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel all</button></form>{% endif %}</td>
     </tr>
-  {% else %}<tr><td colspan="10" class="muted">no events</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="7" class="muted">no events sent yet</td></tr>{% endfor %}
   </tbody>
 </table>
+{% if loose_events %}
+<h2>Other events</h2>
+<table class="grid small" data-live>
+  <thead><tr><th>VEN</th><th>Preset</th><th>Event</th><th>Start</th><th>Status</th><th>Responses</th></tr></thead>
+  <tbody>{% for e in loose_events %}<tr><td>{{ e.ven_name }}</td><td>{{ e.preset_label }}</td><td><code class="small">{{ e.event_id[:8] }}</code></td><td>{{ e.dtstart|ts }}</td><td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span></td><td>{% for r in e.responses %}{{ r.opt_type }} {{ r.response_code }} {% endfor %}</td></tr>{% endfor %}</tbody>
+</table>
+{% endif %}
 {% endblock %}

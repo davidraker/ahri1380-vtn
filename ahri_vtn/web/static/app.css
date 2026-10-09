@@ -49,3 +49,12 @@ ul.assertions { margin:6px 0 0; padding-left:0; list-style:none; } ul.assertions
 .prompt { background:#fef3c7; border:1px solid #f59e0b; border-radius:8px; padding:12px 16px; margin:12px 0; } .prompt h2 { margin-top:0; }
 dl.scenarios dt { font-weight:600; margin-top:8px; } dl.scenarios dd { margin:0 0 4px; color:#374151; }
 p.pager a { margin:0 8px; } a.current { font-weight:700; }
+
+fieldset.targets { border:1px solid var(--line); border-radius:8px; padding:8px 12px; margin:6px 0; background:#fafbfd; width:100%; }
+fieldset.targets legend { font-weight:600; font-size:13px; padding:0 4px; }
+.tsel-grid { display:flex; flex-wrap:wrap; gap:6px 18px; }
+.tsel-ven { min-width:180px; } .tsel-venlabel { display:block; } .tsel-res { margin-left:22px; display:flex; flex-wrap:wrap; gap:2px 12px; }
+.tsel-res label { white-space:nowrap; font-size:12.5px; } .tsel-res label.disabled { color:var(--muted); }
+.tsel-groups { margin-top:6px; padding-top:6px; border-top:1px dotted var(--line); display:flex; flex-wrap:wrap; gap:4px 14px; }
+fieldset.targets.compact .tsel-grid { max-height:160px; overflow:auto; }
+form.inline-form { display:inline; margin:0; }

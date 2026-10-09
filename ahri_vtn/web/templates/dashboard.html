@@ -13,7 +13,7 @@
 <section>
   <h2>VENs</h2>
   <table class="grid" data-live>
-    <thead><tr><th>Name</th><th>Status</th><th>venID</th><th>Last poll</th><th>Op. state</th><th>Power (W)</th><th>Override</th><th>Rated (W)</th><th>Live events</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Status</th><th>venID</th><th>Last poll</th><th>Resources</th><th>Op. state</th><th>Power (W)</th><th>Override</th><th>Rated (W)</th><th>Live events</th><th></th></tr></thead>
     <tbody>
     {% for v in vens %}
       <tr>
@@ -21,6 +21,7 @@
         <td>{% if v.online %}<span class="tag ok">online</span>{% elif v.registered %}<span class="tag warn">silent</span>{% else %}<span class="tag muted">not registered</span>{% endif %}</td>
         <td><code class="small">{{ v.ven_id or '-' }}</code></td>
         <td>{{ v.last_poll_at|ago }}</td>
+        <td>{{ v.resource_count }}</td>
         <td>{% if v.status['Operational State'] is not none %}{{ v.status['Operational State']|num }} <span class="muted">{{ v.operational_state_name }}</span>{% else %}-{% endif %}</td>
         <td>{{ v.status['Inst Power']|num }}</td>
         <td>{% if v.status['Override State'] == 1 %}<span class="tag bad">override</span>{% elif v.status['Override State'] == 0 %}no{% else %}-{% endif %}</td>
@@ -29,7 +30,7 @@
         <td><a class="btn small" href="/ui/vens/{{ v.id }}">open</a></td>
       </tr>
     {% else %}
-      <tr><td colspan="10" class="muted">No VENs yet. {% if config.auto_accept_unknown_vens %}Unknown VENs are accepted automatically when they register; you can also pre-register one below.{% else %}Add the VEN name below before it registers.{% endif %}</td></tr>
+      <tr><td colspan="11" class="muted">No VENs yet. {% if config.auto_accept_unknown_vens %}Unknown VENs are accepted automatically when they register; you can also pre-register one below.{% else %}Add the VEN name below before it registers.{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>

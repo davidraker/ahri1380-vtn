@@ -80,6 +80,60 @@ class Ven(Base):
 
     registrations: Mapped[list["RegistrationEvent"]] = relationship(back_populates="ven", cascade="all, delete-orphan")
     registered_reports: Mapped[list["RegisteredReport"]] = relationship(back_populates="ven", cascade="all, delete-orphan")
+    resources: Mapped[list["Resource"]] = relationship(back_populates="ven", cascade="all, delete-orphan")
+
+
+class Resource(Base):
+    """A resource (HVAC unit) behind a VEN, discovered from the reportDataSource/resourceID of its reports."""
+    __tablename__ = "resources"
+    __table_args__ = (Index("ix_resources_ven_rid", "ven_pk", "resource_id", unique=True),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ven_pk: Mapped[int] = mapped_column(ForeignKey("vens.id"), index=True)
+    resource_id: Mapped[str] = mapped_column(String(255))
+    label: Mapped[Optional[str]] = mapped_column(String(255))
+    notes: Mapped[Optional[str]] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(default=utcnow)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column()
+    latest_status: Mapped[Optional[dict]] = mapped_column(JSON)
+    static_info: Mapped[Optional[dict]] = mapped_column(JSON)
+    ven: Mapped["Ven"] = relationship(back_populates="resources")
+
+
+class Group(Base):
+    """A named, saved set of VENs and resources that can be targeted by events, report requests and runs."""
+    __tablename__ = "groups"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), unique=True)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+    signal_group_id: Mapped[Optional[str]] = mapped_column(String(255))   # eiTarget/groupID to send, if any
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    members: Mapped[list["GroupMember"]] = relationship(back_populates="group", cascade="all, delete-orphan")
+
+
+class GroupMember(Base):
+    __tablename__ = "group_members"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    group_pk: Mapped[int] = mapped_column(ForeignKey("groups.id"), index=True)
+    ven_pk: Mapped[int] = mapped_column(ForeignKey("vens.id", ondelete="CASCADE"), index=True)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255))     # None = the whole VEN
+    group: Mapped["Group"] = relationship(back_populates="members")
+
+
+class Dispatch(Base):
+    """One operator / scenario action that produced events (or report requests) for a selection of targets."""
+    __tablename__ = "dispatches"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32))                        # event | report_request
+    label: Mapped[Optional[str]] = mapped_column(String(255))
+    preset: Mapped[Optional[str]] = mapped_column(String(64))           # event preset or report spec name
+    params: Mapped[Optional[dict]] = mapped_column(JSON)
+    selection: Mapped[Optional[dict]] = mapped_column(JSON)             # the selection as requested
+    resolved: Mapped[Optional[list]] = mapped_column(JSON)              # per-VEN targets actually used
+    source: Mapped[str] = mapped_column(String(32), default="operator")
+    test_step_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("test_steps.id"))
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    cancelled_at: Mapped[Optional[datetime]] = mapped_column()
+    events: Mapped[list["Event"]] = relationship(back_populates="dispatch")
 
 
 class RegistrationEvent(Base):
@@ -145,6 +199,8 @@ class ReportRequest(Base):
     r_ids: Mapped[Optional[list]] = mapped_column(JSON)
     granularity_seconds: Mapped[Optional[float]] = mapped_column(Float)
     report_back_duration_seconds: Mapped[Optional[float]] = mapped_column(Float)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255))     # when the report covers a single resource
+    dispatch_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("dispatches.id"), index=True)
     one_shot: Mapped[bool] = mapped_column(Boolean, default=False)
     status: Mapped[str] = mapped_column(String(32), default="queued")   # queued|created|active|cancel_requested|cancelled|completed
     source: Mapped[str] = mapped_column(String(32), default="auto")     # auto|operator|scenario
@@ -206,12 +262,16 @@ class Event(Base):
     ramp_up_seconds: Mapped[Optional[float]] = mapped_column(Float)
     notification_seconds: Mapped[Optional[float]] = mapped_column(Float)
     signals: Mapped[Optional[list]] = mapped_column(JSON)
+    targets: Mapped[Optional[list]] = mapped_column(JSON)               # eiTarget entries as sent
+    target_resource_ids: Mapped[Optional[list]] = mapped_column(JSON)   # None = the whole VEN
+    dispatch_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("dispatches.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     cancelled_at: Mapped[Optional[datetime]] = mapped_column()
     completed_at: Mapped[Optional[datetime]] = mapped_column()
     source: Mapped[str] = mapped_column(String(32), default="operator")
     test_step_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("test_steps.id"))
     responses: Mapped[list["EventResponse"]] = relationship(back_populates="event", cascade="all, delete-orphan")
+    dispatch: Mapped[Optional["Dispatch"]] = relationship(back_populates="events")
 
     @property
     def dtend(self) -> datetime:
@@ -245,6 +305,7 @@ class Opt(Base):
     modification_number: Mapped[Optional[int]] = mapped_column(Integer)
     market_context: Mapped[Optional[str]] = mapped_column(String(255))
     targets: Mapped[Optional[list]] = mapped_column(JSON)
+    resource_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)   # first resourceID target, if any
     created_date_time: Mapped[Optional[datetime]] = mapped_column()
     received_at: Mapped[datetime] = mapped_column(default=utcnow)
     cancelled_at: Mapped[Optional[datetime]] = mapped_column()
@@ -281,6 +342,8 @@ class TestRun(Base):
     scenario_id: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(255))
     ven_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("vens.id"), index=True)
+    selection: Mapped[Optional[dict]] = mapped_column(JSON)             # targets as requested
+    resolved: Mapped[Optional[list]] = mapped_column(JSON)              # per-VEN targets at start
     mode: Mapped[str] = mapped_column(String(16), default="cooling")
     params: Mapped[Optional[dict]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32), default="running")  # running|passed|failed|needs_review|aborted|error

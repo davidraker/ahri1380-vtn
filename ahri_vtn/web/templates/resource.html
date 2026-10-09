@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% from "_targets.html" import target_selector %}
+{% block title %}{{ res.ven_name }} / {{ res.resource_id }}{% endblock %}
+{% block content %}
+<h1><a href="/ui/vens/{{ res.ven_pk }}">{{ res.ven_name }}</a> / {{ res.resource_id }}
+  {% if res.label %}<span class="muted">{{ res.label }}</span>{% endif %}
+  {% if res.reporting %}<span class="tag ok">reporting</span>{% else %}<span class="tag warn">no recent data</span>{% endif %}
+</h1>
+<section class="two">
+  <div data-live>
+    <h2>Resource</h2>
+    <table class="kv">
+      <tr><th>resourceID</th><td><code>{{ res.resource_id }}</code></td></tr>
+      <tr><th>First / last seen</th><td>{{ res.first_seen_at|ts }} / {{ res.last_seen_at|ago }}</td></tr>
+      <tr><th>Samples stored</th><td>{{ res.sample_count }} &middot; <a href="/api/vens/{{ res.ven_pk }}/samples.csv?resource={{ res.resource_id|urlencode }}">CSV</a></td></tr>
+      <tr><th>Groups</th><td>{{ res.groups|join(', ') if res.groups else '-' }}</td></tr>
+    </table>
+    <form method="post" action="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}/notes" class="notes">
+      <input name="label" placeholder="label (e.g. bay 3, serial ...)" value="{{ res.label or '' }}">
+      <textarea name="notes" rows="2" placeholder="Notes">{{ res.notes or '' }}</textarea>
+      <button class="btn small">Save</button>
+    </form>
+    <h2>Static configuration (x-AHRI_STATIC, Table 5)</h2>
+    <table class="grid small">
+      <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Received</th></tr></thead>
+      <tbody>{% for r in res.static_rows %}<tr><td title="{{ r.description }}">{{ r.rid }}</td><td>{{ r.value if r.value is not none else '-' }}</td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+    <h2>Latest status (x-AHRI_STATUS, Table 6)</h2>
+    <table class="grid small">
+      <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Sample time</th><th>Received</th></tr></thead>
+      <tbody>{% for r in res.status_rows %}<tr><td>{{ r.rid }}</td><td><strong>{{ r.value|num }}</strong></td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|time }}</td><td class="muted">{{ r.received_at|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+    <form method="post" action="/ui/report-requests" class="inline">
+      <input type="hidden" name="target" value="res:{{ res.ven_pk }}:{{ res.resource_id }}">
+      <input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}">
+      <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
+      <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
+      <input name="granularity_seconds" placeholder="interval s" size="8">
+      <button class="btn">Request report for this resource</button>
+    </form>
+  </div>
+  <div data-live>
+    <h2>Telemetry <span class="muted small">last {{ minutes|int }} min &middot; <a href="?minutes=30">30m</a> <a href="?minutes=120">2h</a> <a href="?minutes=480">8h</a> <a href="?minutes=1440">24h</a></span></h2>
+    {% for key, title, chart in [('power', 'Inst Power (W)' ~ (' - rated ' ~ rated|num ~ ' W' if rated else ''), charts.power), ('state', 'Operational State (0-14)', charts.state), ('override', 'Override State', charts.override)] %}
+    <figure>
+      <figcaption>{{ title }} <span class="muted">[{{ chart.y_min|num }} .. {{ chart.y_max|num }}]</span></figcaption>
+      <svg viewBox="0 0 {{ chart.width or 640 }} {{ chart.height or 120 }}" preserveAspectRatio="none" class="chart">
+        {% if key == 'power' and rated %}{% set h = (chart.height or 120) %}
+          {% for frac, cls in [(0.7, 'gc'), (0.4, 'cc')] %}{% set y = h - 5 - (frac * rated - chart.y_min) / (chart.y_max - chart.y_min) * (h - 10) %}
+            <line x1="5" x2="{{ (chart.width or 640) - 5 }}" y1="{{ y }}" y2="{{ y }}" class="limit {{ cls }}"/>{% endfor %}{% endif %}
+        {% if chart.points %}<polyline points="{{ chart.points }}" />{% else %}<text x="20" y="60" class="muted">no samples in window</text>{% endif %}
+        {% for x, label in chart.labels %}<text x="{{ x }}" y="{{ (chart.height or 120) - 1 }}" class="axis">{{ label }}</text>{% endfor %}
+      </svg>
+    </figure>
+    {% endfor %}
+    <h2>Run a conformance test on this resource</h2>
+    <form method="post" action="/ui/runs" class="inline">
+      <input type="hidden" name="target" value="res:{{ res.ven_pk }}:{{ res.resource_id }}">
+      <select name="scenario_id">{% for sc in scenarios %}<option value="{{ sc.id }}">{{ sc.title }}</option>{% endfor %}</select>
+      <select name="mode"><option value="cooling">cooling</option><option value="heating">heating</option></select>
+      <button class="btn primary">Start</button> <a class="small" href="/ui/runs?ven={{ res.ven_pk }}&resource={{ res.resource_id|urlencode }}">options</a>
+    </form>
+  </div>
+</section>
+<section class="two">
+  <div data-live>
+    <h2>Send an event</h2>
+    <form method="post" action="/ui/events" class="event-form">
+      <input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}">
+      {{ target_selector(tree, selected, compact=True) }}
+      <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
+      <label>start in <input name="start_offset_seconds" value="0" size="4"> s</label>
+      <label>duration <input name="duration_minutes" value="{{ config.default_event_duration_minutes }}" size="4"> min</label>
+      <label>payload <input name="payload" size="4" placeholder="auto"></label>
+      <label>MITO <input name="mito" size="3" placeholder="deg F"></label>
+      <label>prices <input name="price_multipliers" size="16" placeholder="1.0,1.2,..."></label>
+      <label>interval <input name="price_interval_minutes" value="60" size="3"> min</label>
+      <label><input type="checkbox" name="test_event" value="1"> testEvent</label>
+      <button class="btn primary">Send event</button>
+    </form>
+    <h2>Events affecting this resource <span class="muted small">(targeted at it, or at the whole VEN)</span></h2>
+    <table class="grid small">
+      <thead><tr><th>Preset</th><th>Target</th><th>Start</th><th>Duration</th><th>Status</th><th>Responses</th><th></th></tr></thead>
+      <tbody>{% for e in res.events %}
+        <tr><td>{{ e.preset_label }}<br><code class="small muted">{{ e.event_id[:8] }}</code></td><td>{{ e.target_label }}</td><td>{{ e.dtstart|time }}</td><td>{{ e.duration_seconds|duration }}</td>
+            <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span></td>
+            <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }} <span class="muted">m{{ r.modification_number }}</span></div>{% else %}<span class="muted">-</span>{% endfor %}</td>
+            <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="7" class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+    <h2>Customer overrides</h2>
+    <table class="grid small">
+      <thead><tr><th>Received</th><th>optType</th><th>Reason</th><th>Event</th><th>Target</th></tr></thead>
+      <tbody>{% for o in res.opts %}<tr><td>{{ o.received_at|ts }}</td><td><span class="tag {{ o.opt_type|status_class }}">{{ o.opt_type }}</span></td><td>{{ o.opt_reason }}</td><td><code class="small">{{ (o.event_id or '-')[:8] }}</code></td><td>{{ o.resource_id or 'VEN' }}</td></tr>{% else %}<tr><td colspan="5" class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+  <div data-live>
+    <h2>Registered reports covering this resource</h2>
+    {% for rr in res.registered_reports %}
+      <h3>{{ rr.report_name_raw }} <span class="muted small">specifier {{ rr.report_specifier_id }}</span>
+        {% if rr.spec_name %}<span class="tag info">{{ rr.spec_name }}</span>{% endif %}</h3>
+      {% if rr.checklist %}
+      <table class="grid small"><thead><tr><th>Table rID</th><th>Offered as</th><th>reportType</th><th>readingType</th><th>units / description</th><th>period</th></tr></thead>
+      <tbody>{% for c in rr.checklist %}<tr class="{{ '' if c.present else 'missing' }}"><td>{% if c.present %}&#10003;{% else %}&#10007;{% endif %} {{ c.rid or '(extra)' }}</td><td>{{ c.r_id or '-' }}</td><td>{{ c.report_type or '-' }}</td><td>{{ c.reading_type or '-' }}</td><td>{{ c.unit or '-' }} <span class="muted">{{ c.measurement_description or '' }}</span></td><td>{{ c.min_period|duration if c.min_period else '-' }}..{{ c.max_period|duration if c.max_period else '-' }}</td></tr>{% endfor %}</tbody></table>
+      {% endif %}
+    {% else %}<p class="muted">No reports registered for this resource.</p>{% endfor %}
+    <h2>Report requests</h2>
+    <table class="grid small">
+      <thead><tr><th>Report</th><th>Interval</th><th>Mode</th><th>Status</th><th>Updates</th><th>Requested</th></tr></thead>
+      <tbody>{% for r in res.report_requests %}<tr><td>{{ r.spec_name or r.report_specifier_id }}</td><td>{{ r.granularity_seconds|duration }}</td><td>{{ 'one shot' if r.one_shot else 'periodic' }}</td><td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td><td>{{ r.update_count }}</td><td>{{ r.requested_at|time }}</td></tr>{% else %}<tr><td colspan="6" class="muted">none</td></tr>{% endfor %}</tbody>
+    </table>
+    <h2>Recent samples</h2>
+    <table class="grid small">
+      <thead><tr><th>Sample time</th><th>Report</th><th>rID</th><th>Value</th><th>Received</th></tr></thead>
+      <tbody>{% for smp in recent_samples %}<tr><td>{{ smp.ts|time }}</td><td>{{ smp.spec_name or smp.report_specifier_id }}</td><td>{{ smp.r_id }}</td><td>{{ smp.value }}</td><td class="muted">{{ smp.received_at|ago }}</td></tr>{% endfor %}</tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

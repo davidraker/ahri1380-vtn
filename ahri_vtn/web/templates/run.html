@@ -2,7 +2,7 @@
 {% block title %}Run {{ run.id }}{% endblock %}
 {% block content %}
 <h1>Run {{ run.id }}: {{ run.name }} <span class="tag {{ run.status|status_class }}">{{ run.status }}</span></h1>
-<p class="muted">VEN <a href="/ui/vens/{{ run.ven_pk }}">{{ run.ven_name }}</a> &middot; scenario <code>{{ run.scenario_id }}</code> &middot; mode {{ run.mode }} &middot; started {{ run.started_at|ts }}{% if run.finished_at %} &middot; finished {{ run.finished_at|ts }}{% endif %}
+<p class="muted">Targets: {{ run.target_label }} &middot; scenario <code>{{ run.scenario_id }}</code> &middot; mode {{ run.mode }} &middot; started {{ run.started_at|ts }}{% if run.finished_at %} &middot; finished {{ run.finished_at|ts }}{% endif %}
  &middot; <a href="/api/runs/{{ run.id }}/report.json">JSON report</a></p>
 <div data-live>
 {% if prompt %}

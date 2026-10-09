@@ -1,0 +1,37 @@
+{# Target selector: whole VENs, individual resources and saved groups.
+   Usage: {% from "_targets.html" import target_selector %} {{ target_selector(tree, selected) }} #}
+{% macro target_selector(tree, selected, compact=False) %}
+<fieldset class="targets {{ 'compact' if compact }}">
+  <legend>Targets <span class="muted small">(whole VEN, specific resources, saved groups; any mix)</span></legend>
+  <div class="tsel-grid">
+  {% for v in tree.vens %}
+    <div class="tsel-ven">
+      <label class="tsel-venlabel"><input type="checkbox" name="target" value="ven:{{ v.ven_pk }}" data-ven="{{ v.ven_pk }}"
+        {{ 'checked' if ('ven:' ~ v.ven_pk) in selected }}> <strong>{{ v.ven_name }}</strong>
+        <span class="muted small">whole VEN{% if not v.registered %}, not registered{% endif %}</span></label>
+      {% if v.resources %}
+      <div class="tsel-res">
+        {% for r in v.resources %}
+        <label><input type="checkbox" name="target" value="res:{{ v.ven_pk }}:{{ r }}" data-res-of="{{ v.ven_pk }}"
+          {{ 'checked' if ('res:' ~ v.ven_pk ~ ':' ~ r) in selected }}> {{ r }}</label>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  {% else %}
+    <span class="muted">No VENs yet.</span>
+  {% endfor %}
+  </div>
+  {% if tree.groups %}
+  <div class="tsel-groups">Groups:
+    {% for g in tree.groups %}
+    <label title="{{ g.summary }}{% if g.signal_group_id %} (signals groupID {{ g.signal_group_id }}){% endif %}">
+      <input type="checkbox" name="target" value="group:{{ g.id }}" {{ 'checked' if ('group:' ~ g.id) in selected }}> {{ g.name }}</label>
+    {% endfor %}
+    <a class="small" href="/ui/groups">manage</a>
+  </div>
+  {% else %}
+  <div class="tsel-groups muted small">No saved groups. <a href="/ui/groups">Create one</a> to target the same set repeatedly.</div>
+  {% endif %}
+</fieldset>
+{% endmacro %}

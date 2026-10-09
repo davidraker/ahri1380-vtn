@@ -12,7 +12,8 @@ and Small Commercial Applications*. It is built on a fork of [OpenLEADR](https:/
   one-shot requests on demand, every sample stored.
 - Events from Table 8 (General / Critical / Full curtailment, MITO offset, precondition, price
   stream, cancel) with recording of the VEN's `oadrCreatedEvent` responses (opt type and response
-  code, e.g. 460 for two-capacity units).
+  code, e.g. 460 for two-capacity units). Events, report requests and test runs target any
+  selection of whole VENs, individual resources (units behind a fleet VEN) or saved groups.
 - Customer override capture (`oadrCreateOpt` / `oadrCancelOpt`).
 - Raw XML log of every message (paired request/response), with schema violations recorded as
   findings instead of rejected (lenient mode).
@@ -38,7 +39,7 @@ ahri_vtn/                the VTN test tool package
   web/                   JSON API (/api) and HTML UI (/ui)
 sim_ven/ahri_sim_ven.py  simulated VEN (OpenLEADR client) with a simple HVAC power model
 tests/                   pytest end-to-end tests (VTN <-> simulated VEN)
-docs/                    user guide, draft-standard issue list, the draft standard PDF
+docs/                    user guide
 ```
 
 ## Setup

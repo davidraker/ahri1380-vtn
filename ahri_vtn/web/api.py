@@ -13,6 +13,7 @@ from datetime import timedelta
 from aiohttp import web
 
 from .. import spec
+from ..targets import Selection
 from ..util import jsonable, parse_iso, utcnow
 
 logger = logging.getLogger("ahri_vtn.api")
@@ -31,13 +32,43 @@ def error(message: str, status: int = 400) -> web.Response:
 
 
 async def read_body(request: web.Request) -> dict:
+    """Body as a dict. Repeated form fields named 'target' are collected into a 'targets' list."""
     if request.content_type == "application/json":
         try:
             return await request.json()
         except json.JSONDecodeError as err:
             raise web.HTTPBadRequest(text=f"Invalid JSON: {err}")
     data = await request.post()
-    return {k: v for k, v in data.items()}
+    body = {k: v for k, v in data.items()}
+    targets = data.getall("target", [])
+    if targets:
+        body["targets"] = list(targets)
+    return body
+
+
+def selection_from(data: dict, default_ven_pk=None) -> Selection:
+    """
+    Build a Selection from a request body: 'selection' (wire dict), 'targets' (form values such as
+    'ven:3' / 'res:3:hvac-1' / 'group:2'), or 'ven_pk' (+ optional 'resource_ids') for one VEN.
+    """
+    if data.get("selection"):
+        sel = data["selection"]
+        if isinstance(sel, str):
+            sel = json.loads(sel)
+        return Selection.from_any(sel)
+    if data.get("targets"):
+        return Selection.from_form(data["targets"])
+    if data.get("group_pk"):
+        return Selection(groups=[int(data["group_pk"])])
+    ven_pk = _int(data.get("ven_pk")) if data.get("ven_pk") else default_ven_pk
+    if ven_pk is None:
+        raise ValueError("Select at least one VEN, resource or group")
+    resource_ids = data.get("resource_ids")
+    if isinstance(resource_ids, str):
+        resource_ids = [r.strip() for r in resource_ids.split(",") if r.strip()]
+    if data.get("resource_id"):
+        resource_ids = [data["resource_id"]]
+    return Selection(vens=[{"ven_pk": ven_pk, "resource_ids": resource_ids or None}])
 
 
 def _bool(value, default=False) -> bool:
@@ -133,7 +164,7 @@ class Api:
                                                    report_specifier_id=data.get("report_specifier_id") or None,
                                                    one_shot=_bool(data.get("one_shot"), True),
                                                    granularity_seconds=_float(data.get("granularity_seconds")),
-                                                   source="operator")
+                                                   source="operator", resource_id=data.get("resource_id") or None)
         except ValueError as err:
             return error(str(err), 409)
         return json_response({"report_request_id": rrid}, 201)
@@ -157,7 +188,7 @@ class Api:
         until = parse_iso(qs.get("until")) if qs.get("until") else None
         return self.q.samples(ven_pk, spec_rid=qs.get("rid") or None, r_key=qs.get("r_key") or None,
                               since=since, until=until, limit=int(qs.get("limit", 5000)),
-                              order=qs.get("order", "asc"))
+                              order=qs.get("order", "asc"), resource_id=qs.get("resource") or None)
 
     async def samples_csv(self, request):
         ven_pk = int(request.match_info["pk"])
@@ -176,7 +207,7 @@ class Api:
         ven_pk = int(request.match_info["pk"])
         minutes = float(request.query.get("minutes", 120))
         since = utcnow() - timedelta(minutes=minutes)
-        series = self.q.status_series(ven_pk, since)
+        series = self.q.status_series(ven_pk, since, resource_id=request.query.get("resource") or None)
         return json_response({rid: [{"ts": ts, "value": v} for ts, v in pts] for rid, pts in series.items()})
 
     async def findings(self, request):
@@ -189,7 +220,8 @@ class Api:
     async def list_events(self, request):
         return json_response(self.q.list_events(ven_pk=_int(request.query.get("ven")),
                                                 limit=int(request.query.get("limit", 100)),
-                                                status=request.query.get("status") or None))
+                                                status=request.query.get("status") or None,
+                                                resource_id=request.query.get("resource") or None))
 
     async def get_event(self, request):
         ev = self.q.get_event(request.match_info["event_id"])
@@ -198,15 +230,14 @@ class Api:
     async def create_event(self, request):
         data = await read_body(request)
         try:
-            event_id = self.create_event_from_form(data)
+            result = self.create_event_from_form(data)
         except (ValueError, KeyError) as err:
             return error(str(err))
-        return json_response({"event_id": event_id}, 201)
+        return json_response({"event_id": next(iter(result["events"].values())), **result}, 201)
 
-    def create_event_from_form(self, data: dict) -> str:
-        ven_pk = _int(data.get("ven_pk"))
-        if ven_pk is None:
-            raise ValueError("ven_pk is required")
+    def create_event_from_form(self, data: dict, default_ven_pk=None) -> dict:
+        """Dispatch an event to the selection described by the form / JSON body."""
+        selection = selection_from(data, default_ven_pk)
         preset = data.get("preset") or "general_curtailment"
         if preset not in spec.EVENT_PRESETS:
             raise ValueError(f"Unknown preset '{preset}'")
@@ -222,11 +253,73 @@ class Api:
             multipliers = [float(x) for x in multipliers.replace(";", ",").split(",") if x.strip()]
         price_interval = timedelta(minutes=_float(data.get("price_interval_minutes"), 60))
         ramp_up = timedelta(seconds=_float(data["ramp_up_seconds"])) if data.get("ramp_up_seconds") else None
-        return self.vtn.events.create_event(
-            ven_pk, preset, start=start, duration=duration, payload=_float(data.get("payload")),
+        return self.vtn.events.dispatch_event(
+            selection, preset, start=start, duration=duration, payload=_float(data.get("payload")),
             mito=_int(data.get("mito")), price_multipliers=multipliers, price_interval=price_interval,
             test_event=_bool(data.get("test_event")), vtn_comment=data.get("vtn_comment") or None,
             ramp_up=ramp_up, source=data.get("source") or "operator", label=data.get("label") or None)
+
+    async def list_dispatches(self, request):
+        return json_response(self.q.list_dispatches(limit=int(request.query.get("limit", 100)),
+                                                    kind=request.query.get("kind", "event")))
+
+    async def get_dispatch(self, request):
+        d = self.q.get_dispatch(int(request.match_info["pk"]))
+        return json_response(d) if d else error("Not found", 404)
+
+    async def cancel_dispatch(self, request):
+        count = self.vtn.events.cancel_dispatch(int(request.match_info["pk"]))
+        return json_response({"cancelled": count})
+
+    # ------------------------------------------------------------------ resources, groups, targets
+
+    async def list_resources(self, request):
+        return json_response(self.q.list_resources(int(request.match_info["pk"])))
+
+    async def get_resource(self, request):
+        res = self.q.get_resource(int(request.match_info["pk"]), request.match_info["rid"])
+        return json_response(res) if res else error("Not found", 404)
+
+    async def update_resource(self, request):
+        data = await read_body(request)
+        ok = self.q.update_resource(int(request.match_info["pk"]), request.match_info["rid"],
+                                    **{k: data[k] for k in ("label", "notes") if k in data})
+        return json_response({"ok": ok}) if ok else error("Not found", 404)
+
+    async def targets(self, request):
+        return json_response(self.q.selector_tree())
+
+    async def list_groups(self, request):
+        return json_response(self.vtn.groups.list_groups())
+
+    async def get_group(self, request):
+        g = self.vtn.groups.get_group(int(request.match_info["pk"]))
+        return json_response(g) if g else error("Not found", 404)
+
+    async def save_group(self, request):
+        data = await read_body(request)
+        group_pk = int(request.match_info["pk"]) if "pk" in request.match_info else None
+        try:
+            selection = selection_from(data) if (data.get("selection") or data.get("targets")) else Selection()
+            group = self.vtn.groups.save_group(data.get("name"), selection, description=data.get("description"),
+                                               signal_group_id=data.get("signal_group_id"), group_pk=group_pk)
+        except ValueError as err:
+            return error(str(err), 409 if "already exists" in str(err) else 400)
+        return json_response(group, 201 if group_pk is None else 200)
+
+    async def delete_group(self, request):
+        ok = self.vtn.groups.delete_group(int(request.match_info["pk"]))
+        return json_response({"ok": ok}) if ok else error("Not found", 404)
+
+    async def request_reports(self, request):
+        data = await read_body(request)
+        try:
+            result = self.vtn.reports.request_reports(selection_from(data), data.get("spec_name") or "x-AHRI_STATUS",
+                                                      one_shot=_bool(data.get("one_shot"), True),
+                                                      granularity_seconds=_float(data.get("granularity_seconds")))
+        except ValueError as err:
+            return error(str(err), 409)
+        return json_response(result, 201)
 
     async def cancel_event(self, request):
         ok = self.vtn.events.cancel_event(request.match_info["event_id"])
@@ -270,7 +363,8 @@ class Api:
                 except ValueError:
                     params[key[6:]] = value
         try:
-            run_pk = self.vtn.conformance.start_run(data.get("scenario_id"), _int(data.get("ven_pk")),
+            selection = selection_from(data)
+            run_pk = self.vtn.conformance.start_run(data.get("scenario_id"), selection=selection,
                                                     mode=data.get("mode") or "cooling", params=params,
                                                     name=data.get("name") or None)
         except (ValueError, KeyError) as err:
@@ -334,6 +428,19 @@ def setup_api(vtn):
         web.delete("/api/vens/{pk}", api.delete_ven),
         web.post("/api/vens/{pk}/request-reregistration", api.request_reregistration),
         web.post("/api/vens/{pk}/request-report", api.request_report),
+        web.get("/api/vens/{pk}/resources", api.list_resources),
+        web.get("/api/vens/{pk}/resources/{rid}", api.get_resource),
+        web.patch("/api/vens/{pk}/resources/{rid}", api.update_resource),
+        web.get("/api/targets", api.targets),
+        web.get("/api/groups", api.list_groups),
+        web.post("/api/groups", api.save_group),
+        web.get("/api/groups/{pk}", api.get_group),
+        web.put("/api/groups/{pk}", api.save_group),
+        web.delete("/api/groups/{pk}", api.delete_group),
+        web.post("/api/report-requests", api.request_reports),
+        web.get("/api/dispatches", api.list_dispatches),
+        web.get("/api/dispatches/{pk}", api.get_dispatch),
+        web.post("/api/dispatches/{pk}/cancel", api.cancel_dispatch),
         web.get("/api/vens/{pk}/samples", api.samples),
         web.get("/api/vens/{pk}/samples.csv", api.samples_csv),
         web.get("/api/vens/{pk}/series", api.series),

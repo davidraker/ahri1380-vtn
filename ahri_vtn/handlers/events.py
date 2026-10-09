@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from .. import spec
 from ..db import models
+from ..targets import Selection
 from ..util import jsonable, utcnow
 
 if TYPE_CHECKING:
@@ -37,9 +38,15 @@ class EventManager:
                      vtn_comment: Optional[str] = None, ramp_up: Optional[timedelta] = None,
                      notification: Optional[timedelta] = None, response_required: str = "always",
                      priority: int = 0, source: str = "operator", test_step_pk: Optional[int] = None,
-                     label: Optional[str] = None) -> str:
+                     label: Optional[str] = None, target_resource_ids: Optional[list] = None,
+                     group_ids: Optional[list] = None, dispatch_pk: Optional[int] = None) -> str:
         """
-        Create and queue an event for a VEN. Returns the event_id.
+        Create and queue an event for one VEN. Returns the event_id.
+
+        By default the event targets the VEN as a whole (eiTarget/venID). With `target_resource_ids`
+        the eiTarget carries those resourceIDs instead, so a VEN that fronts several HVAC units can
+        apply the event to some of them. `group_ids` adds eiTarget/groupID entries. Use
+        `dispatch_event` to address a selection spanning resources, groups or several VENs.
 
         preset_id is one of spec.EVENT_PRESETS. For SIMPLE presets an optional `mito` adds a second
         LOAD_CONTROL:x-loadControlLevelOffset signal (Table 8 "if the event includes two signals").
@@ -94,7 +101,11 @@ class EventManager:
                                              created_date_time=utcnow())
         active_period = objects.ActivePeriod(dtstart=start, duration=duration, ramp_up_period=ramp_up,
                                              notification_period=notification)
-        event = objects.Event(event_descriptor=descriptor, event_signals=signals, targets=[{"ven_id": ven_id}],
+        if target_resource_ids:
+            targets = [{"resource_id": rid} for rid in target_resource_ids]      # groupIDs are VEN-level, not added
+        else:
+            targets = [{"ven_id": ven_id}] + [{"group_id": gid} for gid in (group_ids or [])]
+        event = objects.Event(event_descriptor=descriptor, event_signals=signals, targets=targets,
                               active_period=active_period, response_required=response_required)
 
         with self.vtn.db.session() as s:
@@ -110,14 +121,66 @@ class EventManager:
                                    "intervals": [{"dtstart": i.dtstart, "duration": i.duration,
                                                   "payload": i.signal_payload} for i in sg.intervals]}
                                   for sg in signals]),
-                source=source, test_step_pk=test_step_pk))
+                targets=targets, target_resource_ids=sorted(target_resource_ids) if target_resource_ids else None,
+                dispatch_pk=dispatch_pk, source=source, test_step_pk=test_step_pk))
 
         self.vtn.server.add_raw_event(ven_id=ven_id, event=event, callback=self._on_event_response,
                                       delivery_callback=partial(self._on_event_delivered, event_id))
         self.vtn.bus.publish("event.created", ven_pk=ven_pk, ven_id=ven_id, event_id=event_id, preset=preset_id,
-                             dtstart=start.isoformat(), duration=duration.total_seconds())
-        logger.info(f"Queued event {event_id} ({preset.label}) for VEN {ven_id}")
+                             dtstart=start.isoformat(), duration=duration.total_seconds(),
+                             target_resource_ids=target_resource_ids, dispatch_pk=dispatch_pk)
+        logger.info(f"Queued event {event_id} ({preset.label}) for VEN {ven_id}"
+                    + (f" resources {target_resource_ids}" if target_resource_ids else ""))
         return event_id
+
+    def dispatch_event(self, selection, preset_id: str, *, source: str = "operator",
+                       test_step_pk: Optional[int] = None, label: Optional[str] = None, **kwargs) -> dict:
+        """
+        Send the same event to every VEN in a selection (whole VENs, resources, groups). One
+        OpenADR event per VEN is created; they share a Dispatch record. Returns
+        {'dispatch_pk': int, 'events': {ven_pk: event_id}, 'targets': [VenTarget dicts]}.
+        """
+        sel = Selection.from_any(selection)
+        targets = sel.resolve(self.vtn.db)
+        targets = [t for t in targets if t.ven_id]
+        if not targets:
+            raise ValueError("The selection contains no registered VEN")
+        preset = spec.EVENT_PRESETS[preset_id]
+        with self.vtn.db.session() as s:
+            dispatch = models.Dispatch(kind="event", preset=preset_id, label=label or preset.label,
+                                       params=jsonable(kwargs), selection=sel.as_dict(),
+                                       resolved=[t.as_dict() for t in targets], source=source,
+                                       test_step_pk=test_step_pk)
+            s.add(dispatch)
+            s.flush()
+            dispatch_pk = dispatch.id
+        events = {}
+        try:
+            for target in targets:
+                events[target.ven_pk] = self.create_event(target.ven_pk, preset_id, source=source,
+                                                          test_step_pk=test_step_pk, label=label,
+                                                          target_resource_ids=target.resource_ids,
+                                                          group_ids=target.group_ids, dispatch_pk=dispatch_pk,
+                                                          **kwargs)
+        except Exception:
+            for event_id in events.values():
+                self.cancel_event(event_id)
+            raise
+        self.vtn.bus.publish("dispatch.created", dispatch_pk=dispatch_pk, preset=preset_id,
+                             ven_pks=[t.ven_pk for t in targets])
+        return {"dispatch_pk": dispatch_pk, "events": events, "targets": [t.as_dict() for t in targets]}
+
+    def cancel_dispatch(self, dispatch_pk: int) -> int:
+        """Cancel every live event of a dispatch. Returns the number of events cancelled."""
+        with self.vtn.db.session() as s:
+            dispatch = s.get(models.Dispatch, dispatch_pk)
+            if dispatch is None:
+                return 0
+            event_ids = [e.event_id for e in dispatch.events if e.status in ("far", "near", "active")]
+            dispatch.cancelled_at = utcnow()
+        count = sum(1 for event_id in event_ids if self.cancel_event(event_id))
+        self.vtn.bus.publish("dispatch.cancelled", dispatch_pk=dispatch_pk, cancelled=count)
+        return count
 
     def cancel_event(self, event_id: str) -> bool:
         with self.vtn.db.session() as s:
@@ -164,15 +227,24 @@ class EventManager:
         logger.info(f"VEN {ven_id} responded {opt_type} ({response_code}) to event {event_id} "
                     f"modification {modification_number}")
 
+    @staticmethod
+    def _first_resource_target(targets) -> Optional[str]:
+        for target in targets or []:
+            if isinstance(target, dict) and target.get("resource_id"):
+                return str(target["resource_id"])
+        return None
+
     async def on_create_opt(self, payload):
         ven_id = payload.get("ven_id")
         now = utcnow()
+        resource_id = self._first_resource_target(payload.get("targets"))
         with self.vtn.db.session() as s:
             ven = s.scalar(select(models.Ven).where(models.Ven.ven_id == ven_id))
             s.add(models.Opt(opt_id=str(payload.get("opt_id")), ven_pk=ven.id if ven else None,
                              opt_type=payload.get("opt_type"), opt_reason=payload.get("opt_reason"),
                              event_id=payload.get("event_id"), modification_number=payload.get("modification_number"),
                              market_context=payload.get("market_context"), targets=jsonable(payload.get("targets")),
+                             resource_id=resource_id,
                              created_date_time=payload.get("created_date_time"), received_at=now,
                              raw=jsonable(payload)))
             if ven is not None:
@@ -180,7 +252,7 @@ class EventManager:
             ven_pk = ven.id if ven else None
         self.vtn.bus.publish("opt.created", ven_pk=ven_pk, ven_id=ven_id, opt_id=payload.get("opt_id"),
                              opt_type=payload.get("opt_type"), opt_reason=payload.get("opt_reason"),
-                             event_id=payload.get("event_id"))
+                             event_id=payload.get("event_id"), resource_id=resource_id)
         logger.info(f"VEN {ven_id} sent opt {payload.get('opt_type')}/{payload.get('opt_reason')} "
                     f"for event {payload.get('event_id')}")
 

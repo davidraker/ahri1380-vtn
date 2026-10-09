@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from .. import spec
 from ..db import models
+from ..targets import Selection
 from ..util import jsonable, seconds, to_float, utcnow
 
 if TYPE_CHECKING:
@@ -46,6 +47,26 @@ class ReportHandler:
             if isinstance(max_period, timedelta) and max_period > timedelta(0) and chosen > max_period:
                 chosen = max_period
         return chosen
+
+    @staticmethod
+    def _touch_resources(s, ven_pk: int, resource_ids: set, now) -> dict:
+        """Create/refresh Resource rows for the given resource ids; returns {resource_id: Resource}."""
+        rows = {r.resource_id: r for r in s.scalars(select(models.Resource).where(models.Resource.ven_pk == ven_pk))}
+        for resource_id in resource_ids:
+            if resource_id not in rows:
+                row = models.Resource(ven_pk=ven_pk, resource_id=resource_id, first_seen_at=now, last_seen_at=now)
+                s.add(row)
+                rows[resource_id] = row
+            else:
+                rows[resource_id].last_seen_at = now
+        s.flush()
+        return rows
+
+    @staticmethod
+    def _report_resource_id(descriptions) -> Optional[str]:
+        """The single resourceID a registered report covers, or None if none / several."""
+        ids = {d.resource_id for d in descriptions if d.resource_id}
+        return ids.pop() if len(ids) == 1 else None
 
     async def _noop(self, values):
         """Per-rID callback required by OpenLEADR; all storage happens in on_update_report."""
@@ -110,6 +131,8 @@ class ReportHandler:
                 s.add(models.Finding(ven_pk=ven.id, severity="info", code="report-unknown",
                                      message=f"VEN registered a report '{raw_name}' ({specifier_id}) that is not part of AHRI 1380",
                                      evidence={"report_name": raw_name, "report_specifier_id": specifier_id}, ts=now))
+            resource_ids = {(rd.get("report_data_source") or {}).get("resource_id") for rd in descriptions}
+            self._touch_resources(s, ven.id, {r for r in resource_ids if r}, now)
             ven.last_seen_at = now
             ven_pk = ven.id
 
@@ -153,6 +176,7 @@ class ReportHandler:
                 payloads = oadr_utils.getmember(specifier, "specifier_payloads", missing=[]) or []
                 s.add(models.ReportRequest(
                     report_request_id=rrid, ven_pk=ven.id, report_specifier_id=specifier_id, spec_name=spec_name,
+                    resource_id=self._report_resource_id(registered.descriptions) if registered else None,
                     r_ids=[oadr_utils.getmember(p, "r_id") for p in payloads],
                     granularity_seconds=seconds(oadr_utils.getmember(specifier, "granularity", missing=None)),
                     report_back_duration_seconds=seconds(oadr_utils.getmember(specifier, "report_back_duration", missing=None)),
@@ -222,6 +246,10 @@ class ReportHandler:
 
             latest = dict(ven.latest_status or {}) if rspec is spec.STATUS_REPORT else None
             static = dict(ven.static_info or {}) if rspec is spec.STATIC_REPORT else None
+            resources = self._touch_resources(s, ven.id, {r for r in resource_by_key.values() if r}, now)
+            resource_latest = {rid: dict(row.latest_status or {}) for rid, row in resources.items()}
+            resource_static = {rid: dict(row.static_info or {}) for rid, row in resources.items()}
+            touched_resources: set = set()
 
             # An interval normally carries one oadrReportPayload, but the schema allows several
             payload_rows = []
@@ -265,11 +293,27 @@ class ReportHandler:
                         latest[key] = entry
                 if static is not None:
                     static[key] = entry
+                resource_id = resource_by_key.get(r_key)
+                if resource_id:
+                    touched_resources.add(resource_id)
+                    if rspec is spec.STATUS_REPORT:
+                        previous = resource_latest[resource_id].get(key)
+                        if previous is None or (previous.get("ts") or "") <= entry["ts"]:
+                            resource_latest[resource_id][key] = entry
+                    elif rspec is spec.STATIC_REPORT:
+                        resource_static[resource_id][key] = entry
 
             if latest is not None:
                 ven.latest_status = latest
             if static is not None:
                 ven.static_info = static
+            for resource_id in touched_resources:
+                row = resources[resource_id]
+                row.last_seen_at = now
+                if rspec is spec.STATUS_REPORT:
+                    row.latest_status = resource_latest[resource_id]
+                elif rspec is spec.STATIC_REPORT:
+                    row.static_info = resource_static[resource_id]
             ven.last_seen_at = now
             if rr is not None:
                 rr.update_count = (rr.update_count or 0) + 1
@@ -284,16 +328,77 @@ class ReportHandler:
         if one_shot_done and rrid:
             self.vtn.server.cancel_report(ven_id, rrid, report_to_follow=False)
         self.vtn.bus.publish("report.update", ven_pk=ven_pk, ven_id=ven_id, spec_name=spec_name,
-                             report_specifier_id=specifier_id, report_request_id=rrid, values=jsonable(values_summary))
+                             report_specifier_id=specifier_id, report_request_id=rrid, values=jsonable(values_summary),
+                             resource_ids=sorted(touched_resources))
 
     # ------------------------------------------------------------------ VTN initiated requests (UI / scenarios)
 
+    def request_reports(self, selection, spec_name: str, one_shot: bool = True,
+                        granularity_seconds: Optional[float] = None, source: str = "operator",
+                        test_step_pk: Optional[int] = None) -> dict:
+        """
+        Request a report type for every target in a selection: all registered reports of that type
+        for a whole VEN, or the reports covering the selected resources. Returns
+        {'dispatch_pk': int, 'report_request_ids': [...], 'errors': [str]}.
+        """
+        sel = Selection.from_any(selection)
+        targets = [t for t in sel.resolve(self.vtn.db) if t.ven_id]
+        if not targets:
+            raise ValueError("The selection contains no registered VEN")
+        with self.vtn.db.session() as s:
+            dispatch = models.Dispatch(kind="report_request", preset=spec_name, label=f"Request {spec_name}",
+                                       params={"one_shot": one_shot, "granularity_seconds": granularity_seconds},
+                                       selection=sel.as_dict(), resolved=[t.as_dict() for t in targets],
+                                       source=source, test_step_pk=test_step_pk)
+            s.add(dispatch)
+            s.flush()
+            dispatch_pk = dispatch.id
+        rrids, errors = [], []
+        for target in targets:
+            if target.whole_ven:
+                with self.vtn.db.session() as s:
+                    specifiers = [r.report_specifier_id for r in s.scalars(
+                        select(models.RegisteredReport).where(models.RegisteredReport.ven_pk == target.ven_pk,
+                                                              models.RegisteredReport.active.is_(True),
+                                                              models.RegisteredReport.spec_name == spec_name))]
+                if not specifiers:
+                    errors.append(f"{target.ven_name} has not registered {spec_name}")
+                for specifier_id in specifiers:
+                    rrids.append(self.request_report(target.ven_pk, report_specifier_id=specifier_id, one_shot=one_shot,
+                                                     granularity_seconds=granularity_seconds, source=source,
+                                                     test_step_pk=test_step_pk, dispatch_pk=dispatch_pk))
+            else:
+                done_specifiers = set()
+                for resource_id in target.resource_ids:
+                    try:
+                        rrid = self.request_report(target.ven_pk, spec_name=spec_name, one_shot=one_shot,
+                                                   granularity_seconds=granularity_seconds, source=source,
+                                                   test_step_pk=test_step_pk, resource_id=resource_id,
+                                                   dispatch_pk=dispatch_pk, skip_specifiers=done_specifiers)
+                    except ValueError as err:
+                        errors.append(str(err))
+                        continue
+                    if rrid:
+                        rrids.append(rrid)
+                        done_specifiers.add(self._specifier_of_request(rrid))
+        self.vtn.bus.publish("dispatch.created", dispatch_pk=dispatch_pk, kind="report_request", spec_name=spec_name)
+        return {"dispatch_pk": dispatch_pk, "report_request_ids": rrids, "errors": errors}
+
+    def _specifier_of_request(self, rrid: str) -> Optional[str]:
+        with self.vtn.db.session() as s:
+            rr = s.scalar(select(models.ReportRequest).where(models.ReportRequest.report_request_id == rrid))
+            return rr.report_specifier_id if rr else None
+
     def request_report(self, ven_pk: int, spec_name: Optional[str] = None, report_specifier_id: Optional[str] = None,
                        one_shot: bool = True, granularity_seconds: Optional[float] = None,
-                       source: str = "operator", test_step_pk: Optional[int] = None) -> str:
+                       source: str = "operator", test_step_pk: Optional[int] = None,
+                       resource_id: Optional[str] = None, dispatch_pk: Optional[int] = None,
+                       skip_specifiers: Optional[set] = None) -> Optional[str]:
         """
         Queue an oadrCreateReport for the VEN's next poll. Either `spec_name` (x-AHRI_STATUS /
-        x-AHRI_STATIC) or an explicit `report_specifier_id` must be given.
+        x-AHRI_STATIC) or an explicit `report_specifier_id` must be given. With `resource_id`, the
+        registered report of that type covering that resource is chosen (for VENs that expose
+        several resources, each with its own copy of the report).
         """
         with self.vtn.db.session() as s:
             ven = s.get(models.Ven, ven_pk)
@@ -307,12 +412,20 @@ class ReportHandler:
                 query = query.where(models.RegisteredReport.spec_name == spec_name)
             else:
                 raise ValueError("spec_name or report_specifier_id is required")
-            registered = s.scalar(query.order_by(models.RegisteredReport.registered_at.desc()))
+            candidates = s.scalars(query.order_by(models.RegisteredReport.registered_at.desc())).all()
+            if resource_id and not report_specifier_id:
+                candidates = [r for r in candidates
+                              if resource_id in {d.resource_id for d in r.descriptions}]
+            if skip_specifiers and candidates and candidates[0].report_specifier_id in skip_specifiers:
+                return None     # a report covering several selected resources was already requested
+            registered = candidates[0] if candidates else None
             if registered is None:
-                raise ValueError(f"VEN '{ven.ven_name}' has not registered {spec_name or report_specifier_id}")
+                raise ValueError(f"VEN '{ven.ven_name}' has not registered {spec_name or report_specifier_id}"
+                                 + (f" for resource '{resource_id}'" if resource_id else ""))
             ven_id = ven.ven_id
             specifier_id = registered.report_specifier_id
             spec_name = registered.spec_name
+            report_resource_id = self._report_resource_id(registered.descriptions)
             min_periods = [rd.min_period_seconds for rd in registered.descriptions if rd.min_period_seconds]
             max_periods = [rd.max_period_seconds for rd in registered.descriptions if rd.max_period_seconds]
 
@@ -336,13 +449,13 @@ class ReportHandler:
                                          models.RegisteredReport.report_specifier_id == specifier_id,
                                          models.RegisteredReport.active.is_(True)))
             s.add(models.ReportRequest(report_request_id=rrid, ven_pk=ven_pk, report_specifier_id=specifier_id,
-                                       spec_name=spec_name,
+                                       spec_name=spec_name, resource_id=report_resource_id, dispatch_pk=dispatch_pk,
                                        r_ids=[rd.r_id for rd in registered.descriptions] if registered else [],
                                        granularity_seconds=granularity_seconds,
                                        report_back_duration_seconds=granularity_seconds, one_shot=one_shot,
                                        status="queued", source=source, test_step_pk=test_step_pk))
         self.vtn.bus.publish("report.requested", ven_pk=ven_pk, ven_id=ven_id, report_request_id=rrid,
-                             spec_name=spec_name, one_shot=one_shot, source=source)
+                             spec_name=spec_name, one_shot=one_shot, source=source, resource_id=report_resource_id)
         return rrid
 
     def cancel_report(self, report_request_id: str, report_to_follow: bool = False) -> bool:

@@ -1,11 +1,13 @@
 """
 Simulated AHRI 1380 VEN built on the OpenLEADR client.
 
-It registers the Table 5 (x-AHRI_STATIC) and Table 6 (x-AHRI_STATUS) reports, responds to the
-Table 8 events with a very simple HVAC power model and can simulate a customer override
-(oadrCreateOpt). Intended for exercising and testing the AHRI VTN test tool.
+One VEN fronts one or more HVAC units (resources). Each unit registers its own Table 5
+(x-AHRI_STATIC) and Table 6 (x-AHRI_STATUS) reports, responds to the Table 8 events with a very
+simple power model, honours eiTarget venID / resourceID / groupID addressing, and can simulate a
+customer override (oadrCreateOpt). Intended for exercising and testing the AHRI VTN test tool.
 
-    python -m sim_ven.ahri_sim_ven --vtn-url http://localhost:8080/OpenADR2/Simple/2.0b --name sim-hvac
+    python -m sim_ven.ahri_sim_ven --vtn-url http://localhost:8080/OpenADR2/Simple/2.0b --name sim-hvac \\
+        --resources hvac-1,hvac-2
 """
 from __future__ import annotations
 
@@ -30,26 +32,12 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
-class AhriSimVen:
-    def __init__(self, ven_name: str, vtn_url: str, *, resource_id: str = "hvac-1",
-                 rated_power_w: float = 4800.0, benchmark_cooling_w: Optional[float] = None,
-                 benchmark_heating_w: Optional[float] = None, device_type: int = 1, unloading_type: int = 0,
-                 vendor_name: str = "Acme HVAC", device_revision: str = "R3", model_number: str = "HP-48K-2S",
-                 mode: str = "cooling", status_interval: timedelta = timedelta(minutes=1),
-                 static_interval: timedelta = timedelta(hours=1), text_mode: str = "payload",
-                 report_name_style: str = "x-", ven_id: Optional[str] = None, running: bool = True,
-                 ramp_seconds: float = 5.0):
-        """
-        :param unloading_type: 0 = continuously variable (responds to all levels),
-                               1 = discretely variable / two-capacity (NAKs Critical Curtailment with 460)
-        :param text_mode: how the ASCII items of Table 5 are sent: 'payload' puts the string in the
-                          payloadFloat value (schema-invalid, tolerated by the VTN in lenient mode),
-                          'description' puts it in the metadata itemDescription and sends 0.
-        :param report_name_style: 'x-' registers the reports as x-AHRI_STATIC / x-AHRI_STATUS;
-                          'telemetry' registers the status report as TELEMETRY_STATUS with a
-                          reportSpecifierID of '<resource>-x-AHRI_STATUS' (as seen from some vendors).
-        """
-        self.ven_name = ven_name
+class SimUnit:
+    """One HVAC unit: static data plus the dynamic DR state."""
+
+    def __init__(self, resource_id: str, rated_power_w: float, benchmark_cooling_w: Optional[float],
+                 benchmark_heating_w: Optional[float], device_type: int, unloading_type: int, vendor_name: str,
+                 device_revision: str, model_number: str, running: bool, ramp_seconds: float):
         self.resource_id = resource_id
         self.rated_power = float(rated_power_w)
         self.benchmark_cooling = float(benchmark_cooling_w or rated_power_w)
@@ -57,11 +45,7 @@ class AhriSimVen:
         self.device_type = device_type
         self.unloading_type = unloading_type
         self.vendor_name, self.device_revision, self.model_number = vendor_name, device_revision, model_number
-        self.mode = mode
-        self.text_mode = text_mode
         self.ramp_seconds = ramp_seconds
-
-        # Dynamic state
         self.running = running                  # thermostat demand present
         self.level: int = 0                     # active SIMPLE level (0 = none)
         self.heightened = False                 # preconditioning
@@ -75,78 +59,13 @@ class AhriSimVen:
         self.target_power = 0.0
         self.op_state = IDLE_NORMAL
         self.history: list = []                 # (ts, level, power, op_state)
-        self._tick_task = None
-        self.last_opt_response = None
-
-        self.client = OpenADRClient(ven_name=ven_name, vtn_url=vtn_url, ven_id=ven_id)
-        self.client.add_handler("on_event", self.on_event)
-        self.client.add_handler("on_update_event", self.on_update_event)
-        self._add_reports(status_interval, static_interval, report_name_style)
-        self._recompute()
-
-    # ------------------------------------------------------------------ reports
-
-    def _add_reports(self, status_interval, static_interval, style):
-        static_name = "x-AHRI_STATIC"
-        status_name = "x-AHRI_STATUS" if style == "x-" else "TELEMETRY_STATUS"
-        static_spec = f"{self.resource_id}-x-AHRI_STATIC"
-        status_spec = f"{self.resource_id}-x-AHRI_STATUS"
-        static_rate = {"sampling_rate": static_interval, "report_duration": timedelta(hours=24)}
-        status_rate = {"sampling_rate": status_interval, "report_duration": timedelta(hours=24)}
-
-        def text_cb(value):
-            async def cb():
-                return value if self.text_mode == "payload" else 0.0
-            return cb
-
-        numeric = [
-            ("Size", "x_ahri_Rated_Load", "W", lambda: self.rated_power),
-            ("Device_Type", "x-ahri_Type", "x-ahri_Type", lambda: self.device_type),
-            ("Unloading_Type", "x-ahri_UnloadingType", "x-ahri_UnloadingType", lambda: self.unloading_type),
-            ("Benchmark_Power_Cooling", "Benchmark power for HVAC in cooling mode", "Watts", lambda: self.benchmark_cooling),
-            ("Benchmark_Power_Heating", "Benchmark power for HVAC in heating mode", "Watts", lambda: self.benchmark_heating),
-        ]
-        for r_id, description, unit, getter in numeric:
-            async def cb(getter=getter):
-                return float(getter())
-            self.client.add_report(callback=cb, resource_id=self.resource_id, report_specifier_id=static_spec,
-                                   report_name=static_name, r_id=r_id, measurement=description, unit=unit,
-                                   **static_rate)
-        texts = [("Vendor_Name", "Name of manufacturer", self.vendor_name),
-                 ("Device_Revision", "Revision number", self.device_revision),
-                 ("Model_Number", "Model number of HVAC system (ASCII)", self.model_number)]
-        for r_id, description, value in texts:
-            desc = value if self.text_mode == "description" else description
-            self.client.add_report(callback=text_cb(value), resource_id=self.resource_id,
-                                   report_specifier_id=static_spec, report_name=static_name, r_id=r_id,
-                                   measurement=desc, unit="customUnit", **static_rate)
-
-        async def inst_power():
-            return round(self.power, 1)
-
-        async def op_state():
-            return self.op_state
-
-        async def override_state():
-            return 1 if self.override else 0
-
-        self.client.add_report(callback=inst_power, resource_id=self.resource_id, report_specifier_id=status_spec,
-                               report_name=status_name, r_id="Inst Power", measurement="x-ahri_InstPower", unit="W",
-                               **status_rate)
-        self.client.add_report(callback=op_state, resource_id=self.resource_id, report_specifier_id=status_spec,
-                               report_name=status_name, r_id="Operational State", measurement="x-ahri_OperationalState",
-                               unit="Integer", **status_rate)
-        self.client.add_report(callback=override_state, resource_id=self.resource_id, report_specifier_id=status_spec,
-                               report_name=status_name, r_id="Override State", measurement="x-ahri_OverrideState",
-                               unit="Discrete", **status_rate)
-
-    # ------------------------------------------------------------------ HVAC model
+        self.mode = "cooling"
 
     @property
     def normal_power(self) -> float:
         return self.benchmark_cooling * 0.95 if self.mode == "cooling" else self.benchmark_heating * 0.95
 
-    def _recompute(self):
+    def recompute(self):
         """Derive target power and operational state from the current DR state."""
         if self.error:
             self.target_power, self.op_state = 0.0, ERROR
@@ -175,42 +94,176 @@ class AhriSimVen:
         else:
             self.target_power, self.op_state = self.normal_power, RUNNING_NORMAL
 
-    async def _tick(self):
-        """Apply event schedules and ramp the power towards the target (5 s ramp, Section 6.1.13.1)."""
-        try:
-            while True:
-                now = utcnow()
-                level, heightened = 0, False
-                active = None
-                for event in list(self.events.values()):
-                    start, end = event["start"], event["end"]
-                    if event.get("cancelled"):
-                        continue
-                    if start <= now < end:
-                        active = event
-                        if event.get("level"):
-                            level = max(level, event["level"])
-                        if event.get("precondition"):
-                            heightened = True
-                if active is not None and (self.active_event is None or self.active_event["event_id"] != active["event_id"]):
-                    logger.info(f"Event {active['event_id']} is now active (level {active.get('level')})")
-                if active is None and self.active_event is not None:
-                    logger.info(f"Event {self.active_event['event_id']} ended, resuming normal operation")
-                    self.override = False
-                self.active_event = active
-                self.level, self.heightened = level, heightened
-                self._recompute()
-                step = max(abs(self.target_power - self.power) / max(self.ramp_seconds, 0.1), 50.0)
-                if self.power < self.target_power:
-                    self.power = min(self.target_power, self.power + step)
-                elif self.power > self.target_power:
-                    self.power = max(self.target_power, self.power - step)
-                self.history.append((now, self.level, round(self.power, 1), self.op_state))
-                if len(self.history) > 10000:
-                    del self.history[:5000]
-                await asyncio.sleep(1)
-        except asyncio.CancelledError:
+    def has_active_event(self, now: Optional[datetime] = None) -> bool:
+        now = now or utcnow()
+        return any(not e.get("cancelled") and e["start"] <= now < e["end"] for e in self.events.values())
+
+    def tick(self, now: datetime):
+        """Apply the event schedule and ramp the power towards the target (5 s ramp, Section 6.1.13.1)."""
+        level, heightened, active = 0, False, None
+        for event in list(self.events.values()):
+            if event.get("cancelled"):
+                continue
+            if event["start"] <= now < event["end"]:
+                active = event
+                if event.get("level"):
+                    level = max(level, event["level"])
+                if event.get("precondition"):
+                    heightened = True
+        if active is not None and (self.active_event is None or self.active_event["event_id"] != active["event_id"]):
+            logger.info(f"[{self.resource_id}] Event {active['event_id']} is now active (level {active.get('level')})")
+        if active is None and self.active_event is not None:
+            logger.info(f"[{self.resource_id}] Event {self.active_event['event_id']} ended, resuming normal operation")
+            self.override = False
+        self.active_event = active
+        self.level, self.heightened = level, heightened
+        self.recompute()
+        step = max(abs(self.target_power - self.power) / max(self.ramp_seconds, 0.1), 50.0)
+        if self.power < self.target_power:
+            self.power = min(self.target_power, self.power + step)
+        elif self.power > self.target_power:
+            self.power = max(self.target_power, self.power - step)
+        self.history.append((now, self.level, round(self.power, 1), self.op_state))
+        if len(self.history) > 10000:
+            del self.history[:5000]
+
+    def state(self) -> dict:
+        return {"resource_id": self.resource_id, "running": self.running, "level": self.level,
+                "override": self.override, "mito": self.mito, "power": round(self.power, 1),
+                "op_state": self.op_state, "active_event": self.active_event["event_id"] if self.active_event else None,
+                "events": list(self.events), "prices": len(self.prices), "unloading_type": self.unloading_type}
+
+
+class AhriSimVen:
+    def __init__(self, ven_name: str, vtn_url: str, *, resource_id: str = "hvac-1",
+                 resource_ids: Optional[list] = None, rated_power_w: float = 4800.0,
+                 benchmark_cooling_w: Optional[float] = None, benchmark_heating_w: Optional[float] = None,
+                 device_type: int = 1, unloading_type: int = 0, vendor_name: str = "Acme HVAC",
+                 device_revision: str = "R3", model_number: str = "HP-48K-2S", mode: str = "cooling",
+                 status_interval: timedelta = timedelta(minutes=1), static_interval: timedelta = timedelta(hours=1),
+                 text_mode: str = "payload", report_name_style: str = "x-", ven_id: Optional[str] = None,
+                 running: bool = True, ramp_seconds: float = 5.0, group_ids: Optional[list] = None,
+                 unit_overrides: Optional[dict] = None):
+        """
+        :param resource_ids: the units behind this VEN (default: [resource_id]). Each gets its own
+                             x-AHRI_STATIC / x-AHRI_STATUS report.
+        :param unloading_type: 0 = continuously variable (responds to all levels),
+                               1 = discretely variable / two-capacity (NAKs Critical Curtailment with 460)
+        :param text_mode: how the ASCII items of Table 5 are sent: 'payload' puts the string in the
+                          payloadFloat value (schema-invalid, tolerated by the VTN in lenient mode),
+                          'description' puts it in the metadata itemDescription and sends 0.
+        :param report_name_style: 'x-' registers the reports as x-AHRI_STATIC / x-AHRI_STATUS;
+                          'telemetry' registers the status report as TELEMETRY_STATUS with a
+                          reportSpecifierID of '<resource>-x-AHRI_STATUS'.
+        :param group_ids: eiTarget groupID values this VEN has been configured to belong to.
+        :param unit_overrides: {resource_id: {attribute: value}} to vary units (e.g. unloading_type).
+        """
+        self.ven_name = ven_name
+        self.mode = mode
+        self.text_mode = text_mode
+        self.group_ids = list(group_ids or [])
+        self.units: dict[str, SimUnit] = {}
+        for rid in (resource_ids or [resource_id]):
+            unit = SimUnit(rid, rated_power_w, benchmark_cooling_w, benchmark_heating_w, device_type, unloading_type,
+                           vendor_name, device_revision, model_number, running, ramp_seconds)
+            unit.mode = mode
+            for key, value in (unit_overrides or {}).get(rid, {}).items():
+                setattr(unit, key, value)
+            unit.recompute()
+            self.units[rid] = unit
+        self._tick_task = None
+        self.last_opt_response = None
+
+        self.client = OpenADRClient(ven_name=ven_name, vtn_url=vtn_url, ven_id=ven_id)
+        self.client.add_handler("on_event", self.on_event)
+        self.client.add_handler("on_update_event", self.on_update_event)
+        for unit in self.units.values():
+            self._add_reports(unit, status_interval, static_interval, report_name_style)
+
+    # ------------------------------------------------------------------ compatibility accessors (first unit)
+
+    @property
+    def unit(self) -> SimUnit:
+        return next(iter(self.units.values()))
+
+    @property
+    def resource_id(self):
+        return self.unit.resource_id
+
+    def __getattr__(self, name):
+        # level, override, power, op_state, mito, active_event, events, running, prices, rated_power, unloading_type ...
+        if name in ("level", "override", "power", "op_state", "mito", "active_event", "events", "running",
+                    "prices", "rated_power", "unloading_type", "error", "history"):
+            return getattr(self.unit, name)
+        raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        if name in ("running", "error", "override") and "units" in self.__dict__:
+            for unit in self.units.values():
+                setattr(unit, name, value)
+                unit.recompute()
             return
+        if name == "mode" and "units" in self.__dict__:
+            for unit in self.units.values():
+                unit.mode = value
+                unit.recompute()
+        object.__setattr__(self, name, value)
+
+    # ------------------------------------------------------------------ reports
+
+    def _add_reports(self, unit: SimUnit, status_interval, static_interval, style):
+        static_name = "x-AHRI_STATIC"
+        status_name = "x-AHRI_STATUS" if style == "x-" else "TELEMETRY_STATUS"
+        static_spec = f"{unit.resource_id}-x-AHRI_STATIC"
+        status_spec = f"{unit.resource_id}-x-AHRI_STATUS"
+        static_rate = {"sampling_rate": static_interval, "report_duration": timedelta(hours=24)}
+        status_rate = {"sampling_rate": status_interval, "report_duration": timedelta(hours=24)}
+
+        def text_cb(getter):
+            async def cb():
+                return getter() if self.text_mode == "payload" else 0.0
+            return cb
+
+        numeric = [
+            ("Size", "x_ahri_Rated_Load", "W", lambda: unit.rated_power),
+            ("Device_Type", "x-ahri_Type", "x-ahri_Type", lambda: unit.device_type),
+            ("Unloading_Type", "x-ahri_UnloadingType", "x-ahri_UnloadingType", lambda: unit.unloading_type),
+            ("Benchmark_Power_Cooling", "Benchmark power for HVAC in cooling mode", "Watts", lambda: unit.benchmark_cooling),
+            ("Benchmark_Power_Heating", "Benchmark power for HVAC in heating mode", "Watts", lambda: unit.benchmark_heating),
+        ]
+        for r_id, description, unit_str, getter in numeric:
+            async def cb(getter=getter):
+                return float(getter())
+            self.client.add_report(callback=cb, resource_id=unit.resource_id, report_specifier_id=static_spec,
+                                   report_name=static_name, r_id=r_id, measurement=description, unit=unit_str,
+                                   **static_rate)
+        texts = [("Vendor_Name", "Name of manufacturer", lambda: unit.vendor_name),
+                 ("Device_Revision", "Revision number", lambda: unit.device_revision),
+                 ("Model_Number", "Model number of HVAC system (ASCII)", lambda: unit.model_number)]
+        for r_id, description, getter in texts:
+            desc = getter() if self.text_mode == "description" else description
+            self.client.add_report(callback=text_cb(getter), resource_id=unit.resource_id,
+                                   report_specifier_id=static_spec, report_name=static_name, r_id=r_id,
+                                   measurement=desc, unit="customUnit", **static_rate)
+
+        async def inst_power():
+            return round(unit.power, 1)
+
+        async def op_state():
+            return unit.op_state
+
+        async def override_state():
+            return 1 if unit.override else 0
+
+        self.client.add_report(callback=inst_power, resource_id=unit.resource_id, report_specifier_id=status_spec,
+                               report_name=status_name, r_id="Inst Power", measurement="x-ahri_InstPower", unit="W",
+                               **status_rate)
+        self.client.add_report(callback=op_state, resource_id=unit.resource_id, report_specifier_id=status_spec,
+                               report_name=status_name, r_id="Operational State", measurement="x-ahri_OperationalState",
+                               unit="Integer", **status_rate)
+        self.client.add_report(callback=override_state, resource_id=unit.resource_id, report_specifier_id=status_spec,
+                               report_name=status_name, r_id="Override State", measurement="x-ahri_OverrideState",
+                               unit="Discrete", **status_rate)
 
     # ------------------------------------------------------------------ events
 
@@ -239,64 +292,108 @@ class AhriSimVen:
                 parsed["prices"] = [(i["dtstart"], i["duration"], i["signal_payload"]) for i in intervals]
         return parsed
 
+    def _addressed_units(self, event: dict):
+        """Units an event applies to, from its eiTarget: resourceIDs select units, venID / our groupIDs
+        select all, anything else nothing. Returns (units, matched_any_target)."""
+        targets = event.get("targets") or []
+        if not targets:
+            return list(self.units.values()), True
+        selected, matched = [], False
+        for target in targets:
+            if target.get("ven_id") and target["ven_id"] == self.client.ven_id:
+                return list(self.units.values()), True
+            if target.get("group_id") and target["group_id"] in self.group_ids:
+                return list(self.units.values()), True
+            if target.get("resource_id"):
+                matched = True
+                unit = self.units.get(str(target["resource_id"]))
+                if unit is not None:
+                    selected.append(unit)
+            elif target.get("group_id") or target.get("ven_id"):
+                matched = True
+        return selected, matched
+
     async def on_event(self, event):
         parsed = self._parse_event(event)
+        units, _ = self._addressed_units(event)
         logger.info(f"Received event {parsed['event_id']} level={parsed['level']} mito={parsed['mito']} "
-                    f"precondition={parsed['precondition']} status={parsed['status']}")
-        if parsed["mito"] is not None:
-            self.mito = parsed["mito"]
-        if parsed["prices"] is not None:
-            self.prices = parsed["prices"]
-        if parsed["level"] == 2 and self.unloading_type == 1:
+                    f"precondition={parsed['precondition']} status={parsed['status']} "
+                    f"for units {[u.resource_id for u in units]}")
+        if not units:
+            logger.info("Event targets none of our units: opting out with 462 Target mismatch")
+            return "optOut", 462, "Target mismatch"
+        if parsed["level"] == 2 and all(u.unloading_type == 1 for u in units):
             # Two-capacity systems cannot unload 60 %: NAK with 460 and take no action (Table 8)
-            logger.info("Discretely variable unit: NAK Critical Curtailment with 460")
+            logger.info("Discretely variable unit(s): NAK Critical Curtailment with 460")
             return "optOut", 460, "Signal not supported"
-        if parsed["cancelled"]:
-            self.events.pop(parsed["event_id"], None)
-            return "optIn"
-        self.events[parsed["event_id"]] = parsed
+        for unit in units:
+            if parsed["mito"] is not None:
+                unit.mito = parsed["mito"]
+            if parsed["prices"] is not None:
+                unit.prices = parsed["prices"]
+            if parsed["cancelled"]:
+                unit.events.pop(parsed["event_id"], None)
+            elif not (parsed["level"] == 2 and unit.unloading_type == 1):
+                unit.events[parsed["event_id"]] = parsed
         return "optIn"
 
     async def on_update_event(self, event):
         parsed = self._parse_event(event)
         logger.info(f"Event {parsed['event_id']} updated (mod {parsed['modification_number']}, status {parsed['status']})")
         if parsed["cancelled"]:
-            if parsed["event_id"] in self.events:
-                self.events.pop(parsed["event_id"])
-            if self.active_event and self.active_event["event_id"] == parsed["event_id"]:
-                self.override = False
+            for unit in self.units.values():
+                if parsed["event_id"] in unit.events:
+                    unit.events.pop(parsed["event_id"])
+                    # A customer override ends with the event it overrode, unless another event is still active
+                    if not unit.has_active_event():
+                        unit.override = False
             return "optIn"
         return await self.on_event(event)
 
     # ------------------------------------------------------------------ customer override
 
-    async def customer_override(self, event_id: Optional[str] = None, opt_reason: str = enums.OPT_REASON.OVERRIDE_STATUS):
-        """Simulate the customer overriding the event at the thermostat: oadrCreateOpt optOut."""
-        self.override = True
-        self._recompute()
-        if event_id is None and self.active_event is not None:
-            event_id = self.active_event["event_id"]
+    async def customer_override(self, event_id: Optional[str] = None, resource_id: Optional[str] = None,
+                                opt_reason: str = enums.OPT_REASON.OVERRIDE_STATUS):
+        """Simulate the customer overriding the event at the thermostat of one unit: oadrCreateOpt optOut."""
+        unit = self.units[resource_id] if resource_id else next(
+            (u for u in self.units.values() if u.active_event), self.unit)
+        unit.override = True
+        unit.recompute()
+        if event_id is None and unit.active_event is not None:
+            event_id = unit.active_event["event_id"]
         payload = {"opt_id": oadr_utils.generate_id(), "opt_type": enums.OPT.OPT_OUT, "opt_reason": opt_reason,
                    "ven_id": self.client.ven_id, "created_date_time": utcnow(), "request_id": oadr_utils.generate_id(),
-                   "targets": [{"resource_id": self.resource_id}]}
+                   "targets": [{"resource_id": unit.resource_id}]}
         if event_id is not None:
-            event = self.events.get(event_id)
+            event = unit.events.get(event_id)
             payload["event_id"] = event_id
             payload["modification_number"] = event["modification_number"] if event else 0
         message = self.client._create_message("oadrCreateOpt", **payload)
         self.last_opt_response = await self.client._perform_request("EiOpt", message)
-        logger.info(f"Sent customer override opt for event {event_id}: {self.last_opt_response[0] if self.last_opt_response else None}")
+        logger.info(f"[{unit.resource_id}] Sent customer override opt for event {event_id}: "
+                    f"{self.last_opt_response[0] if self.last_opt_response else None}")
         return payload["opt_id"], self.last_opt_response
 
-    async def clear_override(self, opt_id: Optional[str] = None):
-        self.override = False
-        self._recompute()
+    async def clear_override(self, opt_id: Optional[str] = None, resource_id: Optional[str] = None):
+        for unit in ([self.units[resource_id]] if resource_id else self.units.values()):
+            unit.override = False
+            unit.recompute()
         if opt_id:
             message = self.client._create_message("oadrCancelOpt", opt_id=opt_id, ven_id=self.client.ven_id,
                                                   request_id=oadr_utils.generate_id())
             return await self.client._perform_request("EiOpt", message)
 
     # ------------------------------------------------------------------ lifecycle
+
+    async def _tick(self):
+        try:
+            while True:
+                now = utcnow()
+                for unit in self.units.values():
+                    unit.tick(now)
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            return
 
     async def start(self):
         self._tick_task = asyncio.get_event_loop().create_task(self._tick())
@@ -312,11 +409,10 @@ class AhriSimVen:
         return self.client.ven_id
 
     def state(self) -> dict:
+        first = self.unit.state()
         return {"ven_id": self.client.ven_id, "registration_id": self.client.registration_id, "mode": self.mode,
-                "running": self.running, "level": self.level, "override": self.override, "mito": self.mito,
-                "power": round(self.power, 1), "op_state": self.op_state,
-                "active_event": self.active_event["event_id"] if self.active_event else None,
-                "events": list(self.events), "prices": len(self.prices)}
+                "group_ids": self.group_ids, **{k: v for k, v in first.items() if k != "resource_id"},
+                "units": {rid: u.state() for rid, u in self.units.items()}}
 
 
 # ---------------------------------------------------------------------------------------------
@@ -333,23 +429,26 @@ def _control_app(sim: AhriSimVen):
         return web.json_response(sim.state(), dumps=dumps)
 
     async def override(request):
-        opt_id, _ = await sim.customer_override()
+        data = await request.post()
+        opt_id, _ = await sim.customer_override(resource_id=data.get("resource") or request.query.get("resource"))
         return web.json_response({"ok": True, "opt_id": opt_id})
 
     async def clear(request):
-        sim.override = False
-        sim._recompute()
+        data = await request.post()
+        await sim.clear_override(resource_id=data.get("resource") or request.query.get("resource"))
         return web.json_response({"ok": True})
 
     async def set_state(request):
         data = await request.post()
-        if "running" in data:
-            sim.running = data["running"].lower() in ("1", "true", "yes", "on")
-        if "mode" in data:
-            sim.mode = data["mode"]
-        if "error" in data:
-            sim.error = data["error"].lower() in ("1", "true", "yes", "on")
-        sim._recompute()
+        units = [sim.units[data["resource"]]] if data.get("resource") else list(sim.units.values())
+        for unit in units:
+            if "running" in data:
+                unit.running = data["running"].lower() in ("1", "true", "yes", "on")
+            if "error" in data:
+                unit.error = data["error"].lower() in ("1", "true", "yes", "on")
+            if "mode" in data:
+                unit.mode = data["mode"]
+            unit.recompute()
         return web.json_response(sim.state(), dumps=dumps)
 
     app = web.Application()
@@ -363,6 +462,7 @@ def main(argv=None):
     parser.add_argument("--vtn-url", default="http://localhost:8080/OpenADR2/Simple/2.0b")
     parser.add_argument("--name", default="sim-hvac")
     parser.add_argument("--resource-id", default="hvac-1")
+    parser.add_argument("--resources", help="comma separated resource ids for a multi-unit VEN (overrides --resource-id)")
     parser.add_argument("--rated-power", type=float, default=4800.0)
     parser.add_argument("--device-type", type=int, default=1, help="0=cooling only, 1=heat pump")
     parser.add_argument("--unloading-type", type=int, default=0, help="0=continuously variable, 1=discretely variable")
@@ -370,16 +470,19 @@ def main(argv=None):
     parser.add_argument("--status-interval", type=int, default=60, help="status sampling interval in seconds")
     parser.add_argument("--text-mode", choices=["payload", "description"], default="payload")
     parser.add_argument("--report-name-style", choices=["x-", "telemetry"], default="x-")
+    parser.add_argument("--group-ids", help="comma separated eiTarget groupIDs this VEN belongs to")
     parser.add_argument("--control-port", type=int, default=0, help="HTTP control port (0 = disabled)")
     parser.add_argument("--idle", action="store_true", help="start with no thermostat demand")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
-    sim = AhriSimVen(args.name, args.vtn_url, resource_id=args.resource_id, rated_power_w=args.rated_power,
-                     device_type=args.device_type, unloading_type=args.unloading_type, mode=args.mode,
-                     status_interval=timedelta(seconds=args.status_interval), text_mode=args.text_mode,
-                     report_name_style=args.report_name_style, running=not args.idle)
+    sim = AhriSimVen(args.name, args.vtn_url, resource_id=args.resource_id,
+                     resource_ids=[r.strip() for r in args.resources.split(",") if r.strip()] if args.resources else None,
+                     rated_power_w=args.rated_power, device_type=args.device_type, unloading_type=args.unloading_type,
+                     mode=args.mode, status_interval=timedelta(seconds=args.status_interval), text_mode=args.text_mode,
+                     report_name_style=args.report_name_style, running=not args.idle,
+                     group_ids=[g.strip() for g in args.group_ids.split(",") if g.strip()] if args.group_ids else None)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)

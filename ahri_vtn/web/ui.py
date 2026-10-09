@@ -15,8 +15,9 @@ from aiohttp import web
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .. import spec
+from ..targets import Selection
 from ..util import parse_iso, utcnow
-from .api import read_body, _bool, _float, _int
+from .api import read_body, selection_from, _bool, _float, _int
 
 logger = logging.getLogger("ahri_vtn.ui")
 
@@ -143,6 +144,10 @@ class Ui:
                                  "num": fmt_num, "op_state": op_state_name, "status_class": status_class})
         self.env.globals.update({"spec": spec, "presets": spec.EVENT_PRESETS, "now": utcnow})
 
+    def selector(self, selected: Optional[list] = None) -> dict:
+        """Context for the target selector widget."""
+        return {"tree": self.q.selector_tree(), "selected": selected or []}
+
     @property
     def q(self):
         return self.vtn.queries
@@ -188,12 +193,85 @@ class Ui:
         }
         recent_samples = self.q.samples(ven_pk, limit=60, order="desc")
         return self.render("ven.html", request, ven=ven, charts=charts, minutes=minutes, recent_samples=recent_samples,
-                           rated=rated, scenarios=self.vtn.conformance.list_scenarios())
+                           rated=rated, scenarios=self.vtn.conformance.list_scenarios(),
+                           **self.selector([f"ven:{ven_pk}"]))
+
+    async def resource_page(self, request):
+        ven_pk = int(request.match_info["pk"])
+        resource_id = request.match_info["rid"]
+        res = self.q.get_resource(ven_pk, resource_id)
+        if res is None:
+            raise web.HTTPNotFound(text="Unknown resource")
+        minutes = float(request.query.get("minutes", 120))
+        since = utcnow() - timedelta(minutes=minutes)
+        series = self.q.status_series(ven_pk, since, resource_id=resource_id)
+        rated = res.get("rated_power")
+        now = utcnow()
+        charts = {
+            "power": svg_series(series["Inst Power"], y_min=0, y_max=max(float(rated or 0) * 1.1, 1.0) if rated else None,
+                                t_min=since, t_max=now),
+            "state": svg_series(series["Operational State"], y_min=0, y_max=14, t_min=since, t_max=now, step=True),
+            "override": svg_series(series["Override State"], y_min=0, y_max=1, t_min=since, t_max=now, step=True),
+        }
+        recent_samples = self.q.samples(ven_pk, limit=60, order="desc", resource_id=resource_id)
+        return self.render("resource.html", request, res=res, charts=charts, minutes=minutes, rated=rated,
+                           recent_samples=recent_samples, scenarios=self.vtn.conformance.list_scenarios(),
+                           **self.selector([f"res:{ven_pk}:{resource_id}"]))
+
+    async def groups_page(self, request):
+        edit = self.vtn.groups.get_group(int(request.query["edit"])) if request.query.get("edit") else None
+        return self.render("groups.html", request, groups=self.vtn.groups.list_groups(), edit=edit,
+                           **self.selector(edit["form_values"] if edit else []))
+
+    async def save_group(self, request):
+        data = await read_body(request)
+        group_pk = _int(data.get("group_pk"))
+        try:
+            sel = Selection.from_form(data.get("targets") or [])
+            group = self.vtn.groups.save_group(data.get("name"), sel, description=data.get("description"),
+                                               signal_group_id=data.get("signal_group_id"), group_pk=group_pk)
+        except ValueError as err:
+            raise self.redirect("/ui/groups", str(err), "bad")
+        raise self.redirect("/ui/groups", f"Group '{group['name']}' saved", "ok")
+
+    async def delete_group(self, request):
+        self.vtn.groups.delete_group(int(request.match_info["pk"]))
+        raise self.redirect("/ui/groups", "Group deleted", "ok")
+
+    async def resource_notes(self, request):
+        ven_pk = int(request.match_info["pk"])
+        rid = request.match_info["rid"]
+        data = await read_body(request)
+        self.q.update_resource(ven_pk, rid, label=data.get("label") or None, notes=data.get("notes") or None)
+        raise self.redirect(f"/ui/vens/{ven_pk}/resources/{rid}", "Saved", "ok")
+
+    async def request_reports(self, request):
+        data = await read_body(request)
+        back = data.get("back") or "/ui/events"
+        try:
+            result = self.vtn.reports.request_reports(selection_from(data), data.get("spec_name") or "x-AHRI_STATUS",
+                                                      one_shot=_bool(data.get("one_shot"), True),
+                                                      granularity_seconds=_float(data.get("granularity_seconds")))
+        except ValueError as err:
+            raise self.redirect(back, str(err), "bad")
+        msg = f"{len(result['report_request_ids'])} report request(s) queued"
+        if result["errors"]:
+            msg += "; " + "; ".join(result["errors"])
+        raise self.redirect(back, msg, "ok" if not result["errors"] else "bad")
+
+    async def cancel_dispatch(self, request):
+        data = await read_body(request)
+        count = self.vtn.events.cancel_dispatch(int(request.match_info["pk"]))
+        raise self.redirect(data.get("back") or "/ui/events", f"{count} event(s) cancelled", "ok")
 
     async def events_page(self, request):
         ven_pk = _int(request.query.get("ven"))
-        return self.render("events.html", request, events=self.q.list_events(ven_pk=ven_pk, limit=200),
-                           vens=self.q.list_vens(), selected_ven=ven_pk)
+        selected = [f"ven:{ven_pk}"] if ven_pk else []
+        if request.query.get("group"):
+            selected.append(f"group:{request.query['group']}")
+        return self.render("events.html", request, dispatches=self.q.list_dispatches(limit=100),
+                           loose_events=[e for e in self.q.list_events(ven_pk=ven_pk, limit=200) if not e["dispatch_pk"]],
+                           **self.selector(selected))
 
     async def messages_page(self, request):
         qs = request.query
@@ -209,9 +287,16 @@ class Ui:
         return self.render("message.html", request, m=m, pretty=_pretty_xml(m.get("raw_xml")))
 
     async def runs_page(self, request):
-        return self.render("runs.html", request, runs=self.q.list_runs(), vens=self.q.list_vens(),
-                           scenarios=self.vtn.conformance.list_scenarios(), selected_ven=_int(request.query.get("ven")),
-                           selected_scenario=request.query.get("scenario"))
+        selected = []
+        if request.query.get("ven"):
+            selected.append(f"ven:{request.query['ven']}")
+        if request.query.get("resource") and request.query.get("ven"):
+            selected = [f"res:{request.query['ven']}:{request.query['resource']}"]
+        if request.query.get("group"):
+            selected.append(f"group:{request.query['group']}")
+        return self.render("runs.html", request, runs=self.q.list_runs(),
+                           scenarios=self.vtn.conformance.list_scenarios(),
+                           selected_scenario=request.query.get("scenario"), **self.selector(selected))
 
     async def run_page(self, request):
         run = self.q.get_run(int(request.match_info["pk"]))
@@ -258,14 +343,18 @@ class Ui:
     async def request_report(self, request):
         ven_pk = int(request.match_info["pk"])
         data = await read_body(request)
+        back = data.get("back") or f"/ui/vens/{ven_pk}"
         try:
-            rrid = self.vtn.reports.request_report(ven_pk, spec_name=data.get("spec_name") or None,
-                                                   report_specifier_id=data.get("report_specifier_id") or None,
-                                                   one_shot=_bool(data.get("one_shot"), True),
-                                                   granularity_seconds=_float(data.get("granularity_seconds")))
+            result = self.vtn.reports.request_reports(selection_from(data, default_ven_pk=ven_pk),
+                                                      data.get("spec_name") or "x-AHRI_STATUS",
+                                                      one_shot=_bool(data.get("one_shot"), True),
+                                                      granularity_seconds=_float(data.get("granularity_seconds")))
         except ValueError as err:
-            raise self.redirect(f"/ui/vens/{ven_pk}", str(err), "bad")
-        raise self.redirect(f"/ui/vens/{ven_pk}", f"Report requested ({rrid[:8]}); it is delivered on the VEN's next poll", "ok")
+            raise self.redirect(back, str(err), "bad")
+        msg = f"{len(result['report_request_ids'])} report request(s) queued; delivered on the VEN's next poll"
+        if result["errors"]:
+            msg += "; " + "; ".join(result["errors"])
+        raise self.redirect(back, msg, "ok" if not result["errors"] else "bad")
 
     async def cancel_report(self, request):
         data = await read_body(request)
@@ -282,12 +371,13 @@ class Ui:
 
     async def create_event(self, request):
         data = await read_body(request)
-        back = data.get("back") or f"/ui/vens/{data.get('ven_pk')}"
+        back = data.get("back") or "/ui/events"
         try:
-            event_id = self.vtn.api.create_event_from_form(data)
+            result = self.vtn.api.create_event_from_form(data)
         except (ValueError, KeyError) as err:
             raise self.redirect(back, f"Could not create event: {err}", "bad")
-        raise self.redirect(back, f"Event {event_id[:8]} queued", "ok")
+        n = len(result["events"])
+        raise self.redirect(back, f"Event queued to {n} VEN{'s' if n != 1 else ''} (dispatch {result['dispatch_pk']})", "ok")
 
     async def cancel_event(self, request):
         event_id = request.match_info["event_id"]
@@ -306,7 +396,8 @@ class Ui:
                 except ValueError:
                     params[key[6:]] = value
         try:
-            run_pk = self.vtn.conformance.start_run(data.get("scenario_id"), _int(data.get("ven_pk")),
+            selection = selection_from(data)
+            run_pk = self.vtn.conformance.start_run(data.get("scenario_id"), selection=selection,
                                                     mode=data.get("mode") or "cooling", params=params,
                                                     name=data.get("name") or None)
         except (ValueError, KeyError) as err:
@@ -373,6 +464,13 @@ def setup_ui(vtn):
         web.get("/ui", ui.index),
         web.get("/ui/", ui.dashboard),
         web.get("/ui/vens/{pk}", ui.ven_page),
+        web.get("/ui/vens/{pk}/resources/{rid}", ui.resource_page),
+        web.post("/ui/vens/{pk}/resources/{rid}/notes", ui.resource_notes),
+        web.get("/ui/groups", ui.groups_page),
+        web.post("/ui/groups", ui.save_group),
+        web.post("/ui/groups/{pk}/delete", ui.delete_group),
+        web.post("/ui/report-requests", ui.request_reports),
+        web.post("/ui/dispatches/{pk}/cancel", ui.cancel_dispatch),
         web.get("/ui/events", ui.events_page),
         web.get("/ui/messages", ui.messages_page),
         web.get("/ui/messages/{pk}", ui.message_page),

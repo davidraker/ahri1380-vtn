@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_targets.html" import target_selector %}
 {% block title %}{{ ven.ven_name }}{% endblock %}
 {% block content %}
 <h1>{{ ven.ven_name }}
@@ -40,12 +41,38 @@
       <tbody>{% for r in ven.status_rows %}<tr><td>{{ r.rid }}</td><td><strong>{{ r.value|num }}</strong></td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|time }}</td><td class="muted">{{ r.received_at|ago }}</td></tr>{% endfor %}</tbody>
     </table>
     <form method="post" action="/ui/vens/{{ ven.id }}/request-report" class="inline">
+      <select name="resource_id"><option value="">whole VEN (all matching reports)</option>{% for r in ven.resources %}<option value="{{ r.resource_id }}">{{ r.resource_id }}</option>{% endfor %}</select>
       <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
       <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
       <input name="granularity_seconds" placeholder="interval s" size="8">
       <button class="btn">Request report</button>
     </form>
   </div>
+</section>
+
+<section data-live>
+  <h2>Resources <span class="muted small">({{ ven.resources|length }} discovered from the reports' resourceIDs)</span></h2>
+  <table class="grid small">
+    <thead><tr><th>resourceID</th><th>Label</th><th>Reporting</th><th>Op. state</th><th>Power (W)</th><th>Override</th><th>Rated (W)</th><th>Unloading</th><th>Live events</th><th>Last data</th></tr></thead>
+    <tbody>
+    {% for r in ven.resources %}
+      <tr>
+        <td><a href="/ui/vens/{{ ven.id }}/resources/{{ r.resource_id|urlencode }}"><strong>{{ r.resource_id }}</strong></a></td>
+        <td class="muted">{{ r.label or '' }}</td>
+        <td>{% if r.reporting %}<span class="tag ok">yes</span>{% else %}<span class="tag warn">stale</span>{% endif %}</td>
+        <td>{% if r.status['Operational State'] is not none %}{{ r.status['Operational State']|num }} <span class="muted">{{ r.operational_state_name }}</span>{% else %}-{% endif %}</td>
+        <td>{{ r.status['Inst Power']|num }}</td>
+        <td>{% if r.status['Override State'] == 1 %}<span class="tag bad">override</span>{% elif r.status['Override State'] == 0 %}no{% else %}-{% endif %}</td>
+        <td>{{ r.rated_power|num }}</td>
+        <td>{{ spec.UNLOADING_TYPES.get(r.unloading_type|int) if r.unloading_type is not none else '-' }}</td>
+        <td>{{ r.active_events }}</td>
+        <td class="muted">{{ r.last_seen_at|ago }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted">No resources yet. They appear when the VEN registers reports whose descriptions carry a reportDataSource/resourceID. The tables above show the VEN-level view (last report wins when a VEN fronts several units).</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </section>
 
 <section data-live>
@@ -75,8 +102,8 @@
   <div data-live>
     <h2>Events</h2>
     <form method="post" action="/ui/events" class="event-form">
-      <input type="hidden" name="ven_pk" value="{{ ven.id }}">
       <input type="hidden" name="back" value="/ui/vens/{{ ven.id }}">
+      {{ target_selector(tree, selected, compact=True) }}
       <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
       <label>start in <input name="start_offset_seconds" value="0" size="4"> s</label>
       <label>duration <input name="duration_minutes" value="{{ config.default_event_duration_minutes }}" size="4"> min</label>
@@ -93,7 +120,7 @@
       <tbody>
       {% for e in ven.events %}
         <tr>
-          <td>{{ e.preset_label }}{% if e.test_event %} <span class="tag muted">test</span>{% endif %}<br><code class="small muted">{{ e.event_id[:8] }}</code></td>
+          <td>{{ e.preset_label }}{% if e.test_event %} <span class="tag muted">test</span>{% endif %}<br><code class="small muted">{{ e.event_id[:8] }}</code><div class="muted small">{{ e.target_label }}</div></td>
           <td>{{ e.dtstart|time }}</td><td>{{ e.duration_seconds|duration }}</td>
           <td>{% for s in e.signals %}<div class="small">{{ s.signal_name }}:{{ s.signal_type }} = {% if s.intervals|length == 1 %}{{ s.intervals[0].payload }}{% else %}{{ s.intervals|length }} intervals{% endif %}</div>{% endfor %}</td>
           <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} <span class="muted">m{{ e.modification_number }}</span>{% endif %}</td>
@@ -150,7 +177,7 @@
 
     <h2>Run a conformance test</h2>
     <form method="post" action="/ui/runs" class="inline">
-      <input type="hidden" name="ven_pk" value="{{ ven.id }}">
+      <input type="hidden" name="target" value="ven:{{ ven.id }}">
       <select name="scenario_id">{% for sc in scenarios %}<option value="{{ sc.id }}">{{ sc.title }}</option>{% endfor %}</select>
       <select name="mode"><option value="cooling">cooling</option><option value="heating">heating</option></select>
       <button class="btn primary">Start</button> <a class="small" href="/ui/runs?ven={{ ven.id }}">options</a>

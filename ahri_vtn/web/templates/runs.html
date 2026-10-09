@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_targets.html" import target_selector %}
 {% block title %}Test runs{% endblock %}
 {% block content %}
 <h1>Conformance test runs</h1>
@@ -6,7 +7,7 @@
   <div>
     <h2>Start a run</h2>
     <form method="post" action="/ui/runs" class="stack">
-      <label>VEN <select name="ven_pk" required><option value="">choose...</option>{% for v in vens %}<option value="{{ v.id }}" {{ 'selected' if v.id == selected_ven }}>{{ v.ven_name }}{% if not v.registered %} (not registered){% endif %}</option>{% endfor %}</select></label>
+      {{ target_selector(tree, selected) }}
       <label>Scenario <select name="scenario_id" id="scenario">{% for sc in scenarios %}<option value="{{ sc.id }}" {{ 'selected' if sc.id == selected_scenario }} title="{{ sc.description }}">{{ sc.title }} ({{ sc.section }})</option>{% endfor %}</select></label>
       <label>Mode <select name="mode"><option value="cooling">cooling (95 F, A Full)</option><option value="heating">heating (47 F, H1)</option></select></label>
       <label>Run name <input name="name" placeholder="optional"></label>
@@ -22,6 +23,7 @@
         <label>operator prompts <select name="param_operator_prompts"><option value="1">yes</option><option value="0">no (auto-continue)</option></select></label>
         </div>
       </details>
+      <p class="muted small">Events go to every selected VEN (one OpenADR event each, with resourceIDs when specific resources are selected). Response checks are per VEN; state, power and override checks are per resource. A step fails if any unit fails.</p>
       <button class="btn primary">Start run</button>
     </form>
     <h2>Scenarios</h2>
@@ -30,9 +32,9 @@
   <div data-live>
     <h2>Runs</h2>
     <table class="grid small">
-      <thead><tr><th>#</th><th>Run</th><th>VEN</th><th>Mode</th><th>Status</th><th>Steps</th><th>Started</th><th>Finished</th></tr></thead>
+      <thead><tr><th>#</th><th>Run</th><th>Targets</th><th>Mode</th><th>Status</th><th>Steps</th><th>Started</th><th>Finished</th></tr></thead>
       <tbody>{% for r in runs %}
-        <tr><td>{{ r.id }}</td><td><a href="/ui/runs/{{ r.id }}">{{ r.name }}</a></td><td>{{ r.ven_name }}</td><td>{{ r.mode }}</td>
+        <tr><td>{{ r.id }}</td><td><a href="/ui/runs/{{ r.id }}">{{ r.name }}</a></td><td class="small">{{ r.target_label }}</td><td>{{ r.mode }}</td>
             <td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td>
             <td>{% for k, n in r.step_counts.items() %}<span class="tag {{ k|status_class }}">{{ n }} {{ k }}</span> {% endfor %}</td>
             <td>{{ r.started_at|ts }}</td><td>{{ r.finished_at|ts }}</td></tr>
