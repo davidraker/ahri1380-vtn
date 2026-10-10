@@ -57,4 +57,6 @@ fieldset.targets legend { font-weight:600; font-size:13px; padding:0 4px; }
 .tsel-res label { white-space:nowrap; font-size:12.5px; } .tsel-res label.disabled { color:var(--muted); }
 .tsel-groups { margin-top:6px; padding-top:6px; border-top:1px dotted var(--line); display:flex; flex-wrap:wrap; gap:4px 14px; }
 fieldset.targets.compact .tsel-grid { max-height:160px; overflow:auto; }
+form.stack fieldset.targets label, form.event-form fieldset.targets label { display:inline-flex; flex-direction:row; align-items:center; gap:4px; white-space:nowrap; }
+fieldset.targets .tsel-venlabel { display:flex; }
 form.inline-form { display:inline; margin:0; }

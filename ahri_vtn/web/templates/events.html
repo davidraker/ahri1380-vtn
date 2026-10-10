@@ -19,12 +19,13 @@
 </form>
 <form method="post" action="/ui/report-requests" class="inline">
   <input type="hidden" name="back" value="/ui/events">
-  <span class="muted small">Request a report for the same targets (uses the selection above when submitted together; otherwise choose below):</span>
+  <span class="muted small">Request a report:</span>
   <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
   <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
   <input name="granularity_seconds" placeholder="interval s" size="8">
-  <select name="group_pk"><option value="">targets: pick a group...</option>{% for g in tree.groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>
-  <select name="ven_pk"><option value="">...or a whole VEN</option>{% for v in tree.vens %}<option value="{{ v.ven_pk }}">{{ v.ven_name }}</option>{% endfor %}</select>
+  <select name="group_pk"><option value="">for a group...</option>{% for g in tree.groups %}<option value="{{ g.id }}">{{ g.name }}</option>{% endfor %}</select>
+  <select name="ven_pk"><option value="">...or for a whole VEN</option>{% for v in tree.vens %}<option value="{{ v.ven_pk }}">{{ v.ven_name }}</option>{% endfor %}</select>
+  <span class="muted small">(per-resource requests: use the VEN or resource pages)</span>
   <button class="btn">Request report</button>
 </form>
 <p class="muted small">Table 8: SIMPLE level 1 = General Curtailment (70 %), 2 = Critical Curtailment (40 %, two-capacity units NAK 460), 3 = Full Curtailment / off.
