@@ -75,6 +75,9 @@ class ReportHandler:
     # ------------------------------------------------------------------ OpenLEADR handlers
 
     async def on_register_report(self, report: dict):
+        return await self.vtn.db.run(self._register_report, report)
+
+    def _register_report(self, report: dict):
         ven_id = report.get("ven_id")
         raw_name = report.get("report_name")
         base_name = oadr_utils.strip_metadata_prefix(raw_name)
@@ -185,6 +188,9 @@ class ReportHandler:
         self.vtn.bus.publish("report.requested", ven_pk=ven_pk, ven_id=ven_id, source="auto")
 
     async def on_created_report(self, payload):
+        return await self.vtn.db.run(self._created_report, payload)
+
+    def _created_report(self, payload):
         ven_id = payload.get("ven_id")
         pending = [p.get("report_request_id") for p in (payload.get("pending_reports") or [])]
         now = utcnow()
@@ -197,6 +203,9 @@ class ReportHandler:
         self.vtn.bus.publish("report.created", ven_id=ven_id, pending=pending)
 
     async def on_canceled_report(self, payload):
+        return await self.vtn.db.run(self._canceled_report, payload)
+
+    def _canceled_report(self, payload):
         ven_id = payload.get("ven_id")
         still_pending = {str(p.get("report_request_id")) for p in (payload.get("pending_reports") or [])}
         now = utcnow()
@@ -212,6 +221,9 @@ class ReportHandler:
         self.vtn.bus.publish("report.cancelled", ven_id=ven_id, pending=sorted(still_pending))
 
     async def on_update_report(self, report: dict):
+        return await self.vtn.db.run(self._update_report, report)
+
+    def _update_report(self, report: dict):
         ven_id = report.get("ven_id")
         rrid = report.get("report_request_id")
         rrid = str(rrid) if rrid is not None else None

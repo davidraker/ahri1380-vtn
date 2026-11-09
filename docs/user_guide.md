@@ -19,6 +19,7 @@ Contents
 10. JSON API reference
 11. Data storage and export
 12. Troubleshooting
+13. Securing the test tool: TLS, client certificates and operator access
 
 ---
 
@@ -26,9 +27,12 @@ Contents
 
 - Linux, macOS or Windows (WSL recommended) with Python 3.10 to 3.13. All dependencies install
   from prebuilt wheels; no compiler or development headers are needed.
-- Network connectivity between the VTN host and the VEN. The VEN polls the VTN over HTTP
-  (pull mode), so the VTN host must be reachable from the equipment or from the vendor cloud.
-  No inbound connection to the VEN is needed.
+- Network connectivity between the VTN host and the VEN. The VEN polls the VTN over HTTPS
+  (pull mode, OpenADR 2.0b mutual TLS), so the VTN host must be reachable from the equipment or
+  from the vendor cloud on the OpenADR port (443 by default). No inbound connection to the VEN
+  is needed. The operator UI listens on a second port (9443) that only the operator needs.
+- An OpenSSL build that can negotiate the two OpenADR 2.0b default cipher suites; see section
+  13.6, and run `ahri-vtn tls-selfcheck` after installation.
 - The `ahri1380/` folder of the repository with its `openleadr-python` submodule (the OpenLEADR fork,
   branch `ahri-1380`). All commands below are run from `ahri1380/`.
 - A browser for the web interface. No internet access is required at run time; all assets are
@@ -49,16 +53,22 @@ pip install -e ./openleadr-python      # the OpenLEADR fork with the VTN extensi
 pip install -e ".[dev]"                # the tool itself (+ pytest for self-tests)
 ```
 
-Verify the installation:
+Create the lab certificates and the operator password, then verify the installation:
 
 ```bash
-python -m ahri_vtn --help
+ahri-vtn certs quickstart --san <dns-name-or-ip-the-units-will-use> --san localhost
+ahri-vtn hash-password                  # paste the output into [ui] basic_auth_password_hash
+cp config.example.toml config.toml      # then fill in the [tls] / [ui] paths printed by quickstart
+ahri-vtn tls-selfcheck                  # both OpenADR 2.0b default cipher suites must say OK
 python -m sim_ven.ahri_sim_ven --help
-pytest tests                            # optional self-test, about 90 seconds
+pytest tests                            # optional self-test, a few minutes
 ```
 
-The `pytest tests` run starts a VTN and the simulated VEN on random ports and exercises
-registration, reports, events, overrides and every conformance scenario.
+`certs quickstart` writes a lab CA, RSA and ECC VTN certificates, a certificate for the
+simulator and an operator certificate into `certs/` (section 13.3). The `pytest tests` run
+starts a VTN with its own throw-away certificates and the simulated VEN on random ports and
+exercises registration over mutual TLS, reports, events, overrides, the UI security rules and
+every conformance scenario.
 
 ## 3. Configuration
 
@@ -75,9 +85,11 @@ If `config.toml` exists in the working directory it is loaded automatically; oth
 | Key | Default | Meaning |
 |---|---|---|
 | `vtn_id` | `ahri1380-vtn` | The vtnID returned to VENs. |
-| `host`, `port` | `0.0.0.0`, `8080` | Bind address and TCP port for both OpenADR and the UI. |
+| `host`, `port` | `0.0.0.0`, `443` | Bind address and TCP port of the OpenADR listener (the UI has its own, `[ui] host` / `port`, default `127.0.0.1:9443`). |
 | `http_path_prefix` | `/OpenADR2/Simple/2.0b` | OpenADR endpoint prefix (the VEN's VTN URL). |
-| `db_url` | `sqlite:///ahri_vtn.sqlite` | SQLAlchemy URL. SQLite file by default; PostgreSQL works too. |
+| `db_url` | `sqlite:///ahri_vtn.sqlite` | SQLAlchemy URL: `sqlite:///file` or `postgresql://user@host:5432/dbname` (section 11). |
+| `db_password_env` | unset | Name of the environment variable holding the database password (PostgreSQL). Never put the password in the URL. |
+| `db_pool_size` | `5` | Connection pool size of the asynchronous engine (PostgreSQL). |
 | `requested_poll_freq_seconds` | `10` | `oadrRequestedOadrPollFreq` sent to the VEN at registration. |
 | `auto_accept_unknown_vens` | `true` | Accept registrations from VEN names not added in the UI. Set `false` to require pre-registration. |
 | `schema_mode` | `lenient` | `lenient` records XML schema violations as findings and processes the message; `strict` rejects them with HTTP 400. |
@@ -95,43 +107,65 @@ scenarios: `general_curtailment_fraction` (0.70), `critical_curtailment_fraction
 `event_response_timeout_seconds` (60), `override_timeout_seconds` (600),
 `status_interval_tolerance` (0.5) and `max_mito_degrees_f` (4).
 
-The optional `[tls]` table (`http_cert`, `http_key`, `http_ca_file`, `http_key_passphrase`,
-`signing_cert`, `signing_key`, `signing_passphrase`) enables HTTPS with client certificates and
-XML message signing. AHRI 1380 Table 4 specifies plain HTTP without XML signatures, so these are
-normally left unset. The optional `[ui]` table (`basic_auth_user`, `basic_auth_password`)
-protects `/ui` and `/api` with HTTP basic authentication.
+The `[tls]`, `[signatures]`, `[ui]` and `[limits]` tables configure transport security, XML
+signatures, operator access and abuse limits. They are mandatory in the sense that the tool
+refuses to start without a complete, secure set of values; `config.example.toml` documents every
+key and section 13 explains the choices. The defaults are mutual TLS on port 443 with pinned
+VEN fingerprints, no XML signatures (Table 4), and an operator UI on `127.0.0.1:9443` that
+accepts an operator certificate or the password. Plain HTTP exists only as the explicit
+development setting `[tls] mode = "plain"`.
 
 ## 4. Starting the VTN
 
 ```bash
-python -m ahri_vtn --config config.toml
+ahri-vtn --config config.toml            # same as: ahri-vtn run --config config.toml
 ```
 
 Useful flags: `--host`, `--port`, `--db`, `--vtn-id`, `--schema-mode strict|lenient`,
-`--log-level DEBUG`, `--no-web` (OpenADR endpoints only). The console prints the OpenADR URL
-and the UI URL:
+`--log-level DEBUG`, `--no-web` (OpenADR listener only). Port 443 needs the
+`CAP_NET_BIND_SERVICE` capability or a container port mapping (section 13.7); use `port = 8443`
+where that is not possible. The console prints both URLs, the VTN certificates and their
+fingerprints:
 
 ```
-AHRI 1380 VTN 'ahri1380-vtn' listening on http://localhost:8080/OpenADR2/Simple/2.0b (UI: http://0.0.0.0:8080/ui/)
+AHRI 1380 VTN 'ahri1380-vtn' listening on https://localhost/OpenADR2/Simple/2.0b (tls mutual, fingerprint policy pinned, signatures none)
+VTN certificate RSA 2048: O=AHRI 1380 test tool,CN=vtn.lab, SAN vtn.lab, 192.168.10.5, fingerprint 3F:..., expires 2029-02-10
+VTN certificate EC 256: ...
+Operator UI on https://127.0.0.1:9443/ui/ (client certificates optional, password login on)
 ```
 
-Open `http://<vtn-host>:8080/ui/` in a browser. Stop the VTN with Ctrl-C; all data is already
-on disk in the SQLite file, and VENs that stay registered continue to work after a restart
-because registrations are persisted.
+Open `https://127.0.0.1:9443/ui/` in a browser on the VTN host (or through an SSH tunnel or
+VPN), accept or import the lab CA, and log in with the operator certificate or the password.
+Stop the VTN with Ctrl-C; all data is already on disk in the SQLite file, and VENs that stay
+registered continue to work after a restart because registrations and pinned certificates are
+persisted.
 
-Running as a service: any process supervisor works (systemd, supervisord, a container). The
-process needs write access to the directory holding the SQLite file.
+Running as a service: `deploy/ahri-vtn.service` is a hardened systemd unit (unprivileged user,
+`CAP_NET_BIND_SERVICE` for port 443, self-check before start); `Dockerfile` builds a pinned
+container image whose build fails if the cipher-suite self-check does not pass. The process
+needs write access to the directory holding the SQLite file and read access to the keys.
 
 ## 5. Connecting the equipment under test
 
 Configure the VEN (per the manufacturer's instructions, Appendix C.3.1) with:
 
-- **VTN URL**: `http://<vtn-host>:8080/OpenADR2/Simple/2.0b`
-- **VEN name**: any ASCII string. If `auto_accept_unknown_vens` is `false`, add the same
-  name on the dashboard first ("Add VEN"). With auto-accept enabled the VEN is created when
-  it registers; you can still pre-register it to attach notes or a fixed venID.
-- **Security**: none for plain HTTP (Table 4: XML signature N). For HTTPS lab setups, provide
-  the VTN certificate chain to the vendor and configure the `[tls]` section.
+- **VTN URL**: `https://<vtn-host>/OpenADR2/Simple/2.0b` (add `:8443` if the VTN does not
+  run on 443). The host name or IP address must be one of the Subject Alternative Names of the
+  VTN certificate (`ahri-vtn certs vtn --san ...`).
+- **Trust**: give the vendor `certs/lab-ca.crt` (or the VTN certificates themselves if the unit
+  pins a certificate) so the unit accepts the VTN. Never hand out a `.key` file.
+- **The unit's certificate**: OpenADR 2.0b requires the unit to present a client certificate.
+  Add the issuing CA (or the device certificate itself, for self-signed prototypes) to the trust
+  bundle with `ahri-vtn certs bundle add <pem>`, or issue a lab certificate with
+  `ahri-vtn certs ven --name <unit>` and load it into the unit.
+- **VEN name and fingerprint**: with the default `fingerprint_policy = "pinned"`, add the VEN on
+  the dashboard with its certificate fingerprint (printed by the vendor, by
+  `ahri-vtn certs fingerprint <pem>`, or shown in the dashboard's "Refused registrations" list
+  after the unit's first attempt, where one click pins it). With `first-use` the first
+  certificate a new name presents is pinned automatically. A pinned fingerprint is never
+  replaced silently; re-keyed devices are re-pinned by the operator on the VEN page.
+- **XML signatures**: Table 4 says N; leave `[signatures] mode = "none"` unless the committee
+  decides otherwise. Section 13 has the details of every setting.
 
 Expected sequence once the VEN starts: `oadrQueryRegistration`, `oadrCreatePartyRegistration`
 (the VTN assigns venID and registrationID), `oadrRegisterReport` with the `x-AHRI_STATIC` and
@@ -292,8 +326,15 @@ The simulator is useful to learn the tool, to rehearse a test sequence, and to c
 installation before equipment arrives.
 
 ```bash
-python -m sim_ven.ahri_sim_ven --vtn-url http://localhost:8080/OpenADR2/Simple/2.0b --name sim-hvac
+python -m sim_ven.ahri_sim_ven --vtn-url https://localhost/OpenADR2/Simple/2.0b --name sim-hvac \
+    --cert certs/ven-sim-hvac.crt --key certs/ven-sim-hvac.key --ca-file certs/lab-ca.crt
 ```
+
+`certs quickstart` already created `ven-sim-hvac.crt`; `ahri-vtn certs ven --name other` makes
+more. TLS options: `--cert/--key/--ca-file`, `--no-check-hostname`, `--sign-messages` (XML
+signatures with the same certificate), `--tls-max-version 1.2` and `--cipher AES128-SHA256`
+(behave like a VEN that offers only one OpenADR 2.0b default suite), `--vtn-fingerprint` (verify
+a signing VTN). Against a development VTN in `plain` mode pass `--insecure` with an `http://` URL.
 
 Options: `--resources hvac-1,hvac-2,hvac-3` (a fleet VEN with several units, each registering
 its own reports and honouring `resourceID` and `groupID` targets), `--group-ids lab-a` (groupIDs
@@ -302,7 +343,7 @@ two-capacity unit that NAKs Critical Curtailment with 460), `--mode cooling|heat
 `--status-interval 60`, `--text-mode payload|description` (how the ASCII items are sent),
 `--report-name-style x-|telemetry` (register the status report as `x-AHRI_STATUS` or as
 `TELEMETRY_STATUS` with an `x-AHRI_STATUS` specifier, an alternative a VEN might choose), `--idle` (no
-thermostat demand), `--control-port 9090`.
+thermostat demand), `--control-port 9090` (bound to `127.0.0.1`; `--control-host` to change).
 
 With a control port enabled:
 
@@ -316,14 +357,26 @@ curl localhost:9090/state
 
 ## 10. JSON API reference
 
-Everything the UI does is available under `/api`. Responses are JSON; POST bodies may be JSON
-or form-encoded.
+Everything the UI does is available under `/api` on the UI listener (`https://<ui-host>:9443`).
+Every request is authenticated: an operator certificate, HTTP Basic credentials, or a Bearer
+token from the variable named by `[ui] api_tokens_env` (create tokens with `ahri-vtn gen-token`).
+State-changing requests must send JSON (form-encoded bodies are refused for browser sessions, a
+CSRF defence) and must not carry a cross-site `Origin`. Responses are JSON.
+
+```bash
+curl -s --cacert certs/lab-ca.crt -H "Authorization: Bearer $TOKEN" https://127.0.0.1:9443/api/status
+curl -s --cacert certs/lab-ca.crt -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+     -d '{"ven_name": "unit-3", "fingerprint": "5E:71:FA:E4:61:75:9C:EF:A4:D6"}' https://127.0.0.1:9443/api/vens
+```
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/status` | VTN identity, configuration summary and counts. |
+| `GET /api/status` | VTN identity, security summary, who you are logged in as, counts. |
+| `GET /api/tls` | The VTN certificates (subject, SANs, expiry, fingerprints) to hand to vendors, and the cipher suites offered. |
+| `POST /api/vens/{id}/fingerprint`, `DELETE /api/vens/{id}/fingerprint` | Pin (`fingerprint`: OpenADR or SHA-256 form) or clear the VEN's certificate. |
+| `GET /api/rejected-registrations`, `POST /api/rejected-registrations/{id}/dismiss` | Registrations refused because of their certificate. |
 | `GET /api/spec`, `GET /api/presets` | The AHRI tables and event presets as data. |
-| `GET /api/vens`, `POST /api/vens` | List VENs; add one (`ven_name`, optional `ven_id`, `notes`). |
+| `GET /api/vens`, `POST /api/vens` | List VENs; add one (`ven_name`, optional `ven_id`, `notes`, `fingerprint`). |
 | `GET /api/vens/{id}` | Full VEN detail (registration, reports, checklist, latest values, events, opts, findings). |
 | `PATCH /api/vens/{id}`, `DELETE /api/vens/{id}` | Update `enabled` / `notes`; delete. |
 | `POST /api/vens/{id}/request-report` | `spec_name` (`x-AHRI_STATUS` or `x-AHRI_STATIC`) or `report_specifier_id`, `one_shot`, `granularity_seconds`. |
@@ -349,18 +402,39 @@ or form-encoded.
 Example, starting a General Curtailment on VEN 1 for 45 minutes with a 3 F offset:
 
 ```bash
-curl -X POST localhost:8080/api/events -H 'content-type: application/json' \
+curl --cacert certs/lab-ca.crt -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+  -X POST https://127.0.0.1:9443/api/events \
   -d '{"ven_pk": 1, "preset": "general_curtailment", "duration_minutes": 45, "mito": 3}'
 ```
 
 ## 11. Data storage and export
 
-All data lives in the configured database (default `ahri_vtn.sqlite` in the working
-directory). Main tables: `vens`, `registration_events`, `registered_reports`,
+All data lives in the configured database. Two backends are supported through one `db_url`:
+
+- **SQLite** (default): `sqlite:///ahri_vtn.sqlite`, a file in the working directory. Right for a
+  single bench PC; copy the file for a backup.
+- **PostgreSQL**, on the same host or across the network: `pip install -e ".[postgres]"`, then
+  `db_url = "postgresql://ahri_vtn@dbhost:5432/ahri_vtn"` and the password in the environment
+  variable named by `db_password_env` (the URL may carry a user name but never a password; the
+  start-up log and `/api/status` show the URL with the password masked). For TLS to the database
+  server append `?sslmode=verify-full&sslrootcert=/path/to/db-ca.pem` to the URL. Create the
+  database and a role with rights on it beforehand; the tool creates its own tables on first start.
+
+Database access never blocks the VTN's event loop on either backend: handlers, the UI and the
+conformance engine run their queries through an asynchronous driver (aiosqlite, psycopg), so a
+slow network round trip delays only the request that caused it, not VEN polls, live updates or
+other operators. The same test suite runs against both backends
+(`AHRI_VTN_TEST_DB_URL=postgresql://... pytest tests`).
+
+Main tables: `vens`, `registration_events`, `registered_reports`,
 `report_descriptions`, `report_requests`, `report_samples` (one row per rID per interval, with
 numeric or text value, confidence, accuracy, data quality and a link to the raw message),
 `resources`, `groups`, `group_members`, `dispatches`, `events`, `event_responses`, `opts`,
-`messages` (raw XML in and out, paired), `test_runs`, `test_steps` and `findings`.
+`messages` (raw XML in and out, paired, with the TLS version, cipher suite and client
+certificate of each inbound message), `rejected_registrations`, `test_runs`, `test_steps`,
+`findings` and `meta` (schema version). The tool does not migrate databases: when the schema
+version changes it refuses to open the old database and asks you to delete the file (SQLite) or
+drop and recreate the schema (PostgreSQL).
 
 Exports: CSV of samples from the VEN page or `/api/vens/{id}/samples.csv`, JSON run reports,
 and the SQLite file itself (copy it while the VTN is stopped, or use `sqlite3 .backup`). To
@@ -369,12 +443,29 @@ re-register automatically because their venIDs are no longer known.
 
 ## 12. Troubleshooting
 
-- **VEN never appears.** Confirm the VEN can reach `http://<vtn-host>:8080/OpenADR2/Simple/2.0b`
-  (for example `curl -X POST` to it returns HTTP 400 "Content-Type header must be
-  application/xml", which proves connectivity). Check firewall rules and that `host` is
-  `0.0.0.0`, not `127.0.0.1`.
-- **Registration rejected.** With `auto_accept_unknown_vens = false` the VEN name must be added
-  first and the VEN must be enabled. The Findings page shows `reg-unknown-ven` entries.
+- **VEN never appears.** Confirm the VEN can reach `https://<vtn-host>/OpenADR2/Simple/2.0b`:
+  `curl -v --cacert certs/lab-ca.crt --cert certs/ven-sim-hvac.crt --key certs/ven-sim-hvac.key
+  -X POST https://<vtn-host>/OpenADR2/Simple/2.0b/OadrPoll` must return HTTP 400 "Content-Type
+  header must be application/xml", which proves connectivity and trust. Without `--cert` the
+  handshake must fail (that is the client-certificate requirement working). Check firewall
+  rules and that `host` is `0.0.0.0`, not `127.0.0.1`.
+- **Handshake failures on the unit.** Either the unit does not trust the VTN certificate (give
+  it `lab-ca.crt`, and make sure the URL host is in the certificate's SANs), or the VTN does not
+  trust the unit's certificate (add its CA or the certificate to the trust bundle with
+  `ahri-vtn certs bundle add`). The VTN log shows the OpenSSL reason.
+- **Registration answered with 463.** The unit's certificate is trusted but its fingerprint is
+  not pinned to the claimed VEN, or does not match the pinned one. The dashboard's "Refused
+  registrations" list shows the fingerprint and offers to pin it or to add the VEN with it.
+  The Findings page shows `cert-unknown-fingerprint` / `cert-fingerprint-mismatch`. With
+  `auto_accept_unknown_vens = false` the VEN name must be added first (`reg-unknown-ven`).
+- **"cannot offer the OpenADR 2.0b default cipher suite(s)" at start-up.** Run
+  `ahri-vtn tls-selfcheck`; see section 13.6. Usually the ECC certificate is missing
+  (`ecc_cert` / `ecc_key`) or the host's OpenSSL policy removed static RSA key exchange.
+- **UI answers 401 or 403.** 401: no or wrong credentials; after five failures in a minute the
+  address is throttled (429). 403 on a form: the page was stale, reload it (CSRF token). 403 on
+  the API: send JSON, not a form body, and no cross-site `Origin`.
+- **Permission denied binding port 443.** Run under the systemd unit (`CAP_NET_BIND_SERVICE`),
+  in the container, or set `port = 8443`.
 - **HTTP 400 on messages.** Only in `strict` mode. Switch to `lenient` to see the message and
   the violation recorded as a finding.
 - **No report data.** Check the Report requests table on the VEN page: `queued` means the VEN
@@ -397,3 +488,125 @@ re-register automatically because their venIDs are no longer known.
   `sudo apt install python3-dev libxml2-dev libxslt1-dev build-essential` (Debian/Ubuntu).
 - **Verbose OpenLEADR logging.** The default level hides OpenLEADR's per-message INFO lines;
   pass `--log-level DEBUG` to see every message in the console.
+
+## 13. Securing the test tool: TLS, client certificates and operator access
+
+### 13.1 What OpenADR 2.0b requires
+
+OpenADR 2.0b (Profile Specification v1.1) is not optional about transport security. Section 9.2
+requires TLS for all traffic; section 9.2.1.1 requires a client certificate on every connection,
+validated during the handshake, and an application-layer 463 when the certificate does not
+match the venID; conformance rule 67 requires TLS 1.2 with the default cipher suites
+`TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256` and `TLS_RSA_WITH_AES_128_CBC_SHA256`; rule 68
+requires the VTN to hold both an ECC and an RSA certificate; section 10.5.1 defines the
+certificate fingerprint (last 10 bytes of the SHA-256 of the DER certificate) that identifies a
+VEN. AHRI 1380 Table 4 says "transport = HTTP", which most plausibly means the simpleHttp
+transport rather than clear text; the tool implements the 2.0b rules and reports plain HTTP as a
+development mode only.
+
+### 13.2 The three transport modes
+
+| `[tls] mode` | Behaviour | Use |
+|---|---|---|
+| `mutual` (default) | TLS 1.2+, both VTN certificates loaded, client certificate required at the handshake, fingerprint checked on every message. | Any test with real equipment. |
+| `server` | TLS without a client certificate. Every message from such a VEN carries a `tls-no-client-cert` finding. | Prototypes that cannot yet present a certificate. |
+| `plain` | Clear-text HTTP. The log prints an INSECURE banner, the UI shows a red badge, and every VEN gets a `transport-plain-http` finding. The UI itself stays on TLS. | Development against the simulator only. |
+
+### 13.3 The lab PKI (`ahri-vtn certs`)
+
+| Command | Produces |
+|---|---|
+| `certs quickstart --san <name-or-ip> ...` | Everything below in one go, plus a configuration snippet. |
+| `certs init-ca` | `lab-ca.crt/.key` (signs VTN and VEN certificates), `operator-ca.crt/.key` (signs operator certificates), `ven-trust.pem` (the VEN trust bundle, initially the lab CA). |
+| `certs vtn --san vtn.lab --san 192.168.10.5` | `vtn-rsa.crt/.key` (RSA 2048) and `vtn-ecc.crt/.key` (P-256) with those Subject Alternative Names. |
+| `certs ven --name unit-3 [--ecc] [--p12-password ...]` | A client certificate for a unit or the simulator; prints its OpenADR fingerprint. |
+| `certs operator --name dmr` | An operator certificate and a `.p12` for the browser; prints the fingerprint for `operator_fingerprints`. |
+| `certs bundle add vendor-ca.pem` | Adds a vendor CA, an OpenADR Alliance CA, or a single self-signed device certificate to `ven-trust.pem`. |
+| `certs fingerprint cert.pem` | OpenADR and SHA-256 fingerprints of any certificate. |
+| `certs show` | Every certificate in `certs/` and in the configuration, with expiry warnings. |
+
+Private keys are written with mode 0600 and must stay on the VTN host. `certs/`, `*.key`,
+`*.crt`, `*.pem` and `*.p12` are ignored by git.
+
+### 13.4 VEN identity: fingerprint policies
+
+The trust bundle only says a certificate is acceptable; the fingerprint says which VEN it is.
+`[tls] fingerprint_policy` selects how the two are bound:
+
+- `pinned` (default): a VEN registers only if a record with its fingerprint exists. Pin through
+  the Add VEN form, the API, or the one-click action on the dashboard's "Refused registrations"
+  list after the unit's first attempt. Unknown or mismatching certificates get a 463.
+- `first-use`: a new VEN's first certificate is pinned automatically (finding
+  `cert-fingerprint-pinned-on-first-use`); later changes get a 463.
+- `ca-only`: any trusted certificate is accepted for any VEN; fingerprints are recorded and
+  changes are reported (`cert-fingerprint-changed`) but never refused.
+
+In every policy a pinned fingerprint is never replaced by the VTN on its own. Re-keying a device
+is an operator action on the VEN page (re-pin, or clear and let `first-use` pin again), and a
+certificate pinned to one VEN identifies that VEN whatever venName it sends. Certificate
+problems (expired, expiring within `expiry_warning_days`, key below the rule 68 minimum, not
+X.509 v3) are findings on the VEN.
+
+### 13.5 Operator access
+
+The UI/API listener (`[ui]`) is always separate, always TLS, and never anonymous:
+
+- `client_cert = "optional"` (default): a certificate from `operator_ca_file` (and, if
+  `operator_fingerprints` is set, listed there) logs in by itself; a browser without one gets
+  the password prompt (`basic_auth_user`, `basic_auth_password_hash` from `ahri-vtn hash-password`).
+- `client_cert = "required"`: the handshake refuses connections without an operator
+  certificate; with `password_auth = true` the password is a second factor.
+- Scripts use `Authorization: Bearer <token>`, tokens from the environment variable named by
+  `api_tokens_env`.
+- Five authentication failures per minute from one address are throttled; all forms carry a
+  CSRF token; cross-site requests are refused; responses carry a strict Content-Security-Policy,
+  `X-Frame-Options`, `nosniff`, `Referrer-Policy` and HSTS headers; flash messages are signed.
+
+Bind the listener to `127.0.0.1` (default) and reach it through SSH or a VPN, or set `host` to
+the operator network deliberately. Import `operator-<name>.p12` into the browser for
+password-less login; import `lab-ca.crt` to avoid certificate warnings for the UI.
+
+### 13.6 Guaranteeing the mandated cipher suites
+
+Whether the VTN can negotiate the two 2.0b default suites depends on the OpenSSL build, the
+distribution's crypto policy, and the certificates loaded:
+
+1. Static RSA key exchange (`TLS_RSA_WITH_AES_128_CBC_SHA256`) is deprecated and **disabled by
+   the default crypto policy on Fedora and RHEL**; Debian and Ubuntu allow it. The tool sets its
+   cipher list explicitly (`ciphers = "openadr-default"`), which overrides the policy on all of
+   these, but a stricter security level or a future OpenSSL could still remove it.
+2. The ECDSA suite needs the ECC VTN certificate (`ecc_cert` / `ecc_key`), the RSA suite the RSA
+   one. Both are loaded by default.
+3. Both suites are TLS 1.2 suites; `min_version = "1.3"` removes them. A VEN that negotiates
+   TLS 1.3 is fine and is recorded with an informational `tls-cipher-not-default` finding.
+
+The tool therefore checks at start-up that both suites are available and both chains are loaded
+and refuses to run otherwise (`require_default_suites = false` downgrades this to a warning for
+modern-only VENs), and `ahri-vtn tls-selfcheck` performs a real handshake per suite:
+
+```
+$ ahri-vtn tls-selfcheck
+OpenSSL: OpenSSL 3.2.4 11 Feb 2025
+OK   TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256       negotiated ECDHE-ECDSA-AES128-SHA256 (TLSv1.2)
+OK   TLS_RSA_WITH_AES_128_CBC_SHA256               negotiated AES128-SHA256 (TLSv1.2)
+```
+
+Make the self-check part of every deployment (the systemd unit runs it before start, the
+container image runs it at build time). The recommended runtime is the pinned container image
+(`Dockerfile`, Debian 12, OpenSSL 3.0 LTS); on a bare host prefer Debian 12 or Ubuntu 24.04 LTS,
+or Fedora/RHEL with the explicit cipher list as shipped.
+
+### 13.7 Deployment checklist
+
+- Build or install on the target host and run `ahri-vtn tls-selfcheck`.
+- Create the PKI (`certs quickstart --san ...` with every name and address the units will use),
+  the operator password hash, and `config.toml`; keep `config.toml` and `certs/` readable by the
+  service user only.
+- Firewall: only the OpenADR port (443, or 8443) reaches the equipment network; the UI port
+  (9443) is local, SSH or VPN only.
+- Port 443: `deploy/ahri-vtn.service` grants `CAP_NET_BIND_SERVICE`; containers map the port.
+- Give the vendor `lab-ca.crt` and the VTN URL; obtain the unit's certificate or CA and its
+  fingerprint; add them (`certs bundle add`, Add VEN with fingerprint).
+- Never run `mode = "plain"` on a host that equipment can reach.
+- Back up the SQLite file (raw messages and evidence) with the VTN stopped.
+- Keep `lxml`, `signxml`, `cryptography` and `aiohttp` current (`pip install -U`; `pip-audit`).

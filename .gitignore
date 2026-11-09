@@ -14,3 +14,12 @@ test_runs/
 # local planning notes and site-specific configuration
 planning/
 config.toml
+
+# certificates and keys (lab PKI from `ahri-vtn certs`)
+certs/
+*.pem
+*.key
+*.crt
+*.p12
+*.sqlite-shm
+*.sqlite-wal

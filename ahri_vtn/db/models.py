@@ -49,6 +49,17 @@ class Base(DeclarativeBase):
         return out
 
 
+# Bump when the schema changes. The tool is not deployed, so existing databases are recreated,
+# not migrated: Database.create_all() refuses to open a file with another version.
+SCHEMA_VERSION = 2
+
+
+class Meta(Base):
+    __tablename__ = "meta"
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[Optional[str]] = mapped_column(String(255))
+
+
 # ---------------------------------------------------------------------------------------------
 # VENs and registration
 # ---------------------------------------------------------------------------------------------
@@ -59,7 +70,20 @@ class Ven(Base):
     ven_name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     ven_id: Mapped[Optional[str]] = mapped_column(String(128), unique=True, index=True)
     registration_id: Mapped[Optional[str]] = mapped_column(String(128))
-    fingerprint: Mapped[Optional[str]] = mapped_column(String(128))
+    # Client certificate identity (OpenADR 2.0b 10.5.1): the 10-byte fingerprint is the identity key
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    fingerprint_sha256: Mapped[Optional[str]] = mapped_column(String(128))
+    fingerprint_source: Mapped[Optional[str]] = mapped_column(String(16))   # operator | first-use | ca-only
+    fingerprint_set_at: Mapped[Optional[datetime]] = mapped_column()
+    cert_subject: Mapped[Optional[str]] = mapped_column(String(512))
+    cert_issuer: Mapped[Optional[str]] = mapped_column(String(512))
+    cert_not_before: Mapped[Optional[datetime]] = mapped_column()
+    cert_not_after: Mapped[Optional[datetime]] = mapped_column()
+    cert_key_type: Mapped[Optional[str]] = mapped_column(String(16))
+    cert_key_bits: Mapped[Optional[int]] = mapped_column(Integer)
+    last_remote: Mapped[Optional[str]] = mapped_column(String(64))
+    last_tls_version: Mapped[Optional[str]] = mapped_column(String(16))
+    last_tls_cipher: Mapped[Optional[str]] = mapped_column(String(64))
     profile_name: Mapped[Optional[str]] = mapped_column(String(16))
     transport_name: Mapped[Optional[str]] = mapped_column(String(32))
     transport_address: Mapped[Optional[str]] = mapped_column(String(255))
@@ -140,11 +164,30 @@ class RegistrationEvent(Base):
     __tablename__ = "registration_events"
     id: Mapped[int] = mapped_column(primary_key=True)
     ven_pk: Mapped[int] = mapped_column(ForeignKey("vens.id"), index=True)
-    kind: Mapped[str] = mapped_column(String(32))      # create | reregister | cancel | query | request_reregistration
+    kind: Mapped[str] = mapped_column(String(32))      # create | reregister | cancel | query | request_reregistration | pin | clear
     accepted: Mapped[Optional[bool]] = mapped_column(Boolean)
     details: Mapped[Optional[dict]] = mapped_column(JSON)
     ts: Mapped[datetime] = mapped_column(default=utcnow)
     ven: Mapped["Ven"] = relationship(back_populates="registrations")
+
+
+class RejectedRegistration(Base):
+    """
+    A registration refused because of its client certificate (unknown or mismatching fingerprint).
+    Shown on the dashboard so the operator can pin the fingerprint with one click.
+    """
+    __tablename__ = "rejected_registrations"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(default=utcnow, index=True)
+    ven_pk: Mapped[Optional[int]] = mapped_column(ForeignKey("vens.id", ondelete="SET NULL"), index=True)
+    ven_name: Mapped[Optional[str]] = mapped_column(String(255))
+    ven_id: Mapped[Optional[str]] = mapped_column(String(128))
+    reason: Mapped[str] = mapped_column(String(64))         # unknown-fingerprint | fingerprint-mismatch | unknown-ven | ...
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(128))
+    cert_subject: Mapped[Optional[str]] = mapped_column(String(512))
+    cert_issuer: Mapped[Optional[str]] = mapped_column(String(512))
+    remote: Mapped[Optional[str]] = mapped_column(String(64))
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -330,6 +373,12 @@ class Message(Base):
     payload: Mapped[Optional[dict]] = mapped_column(JSON)
     in_reply_to: Mapped[Optional[str]] = mapped_column(String(64))
     pair_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    # Transport evidence (inbound messages): negotiated TLS parameters and the client certificate
+    tls_version: Mapped[Optional[str]] = mapped_column(String(16))
+    tls_cipher: Mapped[Optional[str]] = mapped_column(String(64))
+    peer_fingerprint: Mapped[Optional[str]] = mapped_column(String(128))
+    peer_subject: Mapped[Optional[str]] = mapped_column(String(512))
+    signed: Mapped[Optional[bool]] = mapped_column(Boolean)
 
 
 # ---------------------------------------------------------------------------------------------

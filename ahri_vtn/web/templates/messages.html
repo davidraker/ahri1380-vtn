@@ -10,7 +10,7 @@
   <button class="btn">Filter</button>
 </form>
 <table class="grid small" data-live>
-  <thead><tr><th>#</th><th>Time</th><th>Dir</th><th>Type</th><th>venID</th><th>Remote</th><th>HTTP</th><th>Size</th><th>Schema</th></tr></thead>
+  <thead><tr><th>#</th><th>Time</th><th>Dir</th><th>Type</th><th>venID</th><th>Remote</th><th>TLS</th><th>HTTP</th><th>Size</th><th>Schema</th></tr></thead>
   <tbody>
   {% for m in page['items'] %}
     <tr class="{{ 'bad-row' if m.schema_error }}">
@@ -18,10 +18,12 @@
       <td>{{ m.ts|ts }}</td>
       <td>{% if m.direction == 'in' %}&rarr; VTN{% else %}VTN &rarr;{% endif %}</td>
       <td><a href="/ui/messages/{{ m.id }}"><code>{{ m.message_type or '(none)' }}</code></a>{% if m.in_reply_to %} <span class="muted">re {{ m.in_reply_to }}</span>{% endif %}</td>
-      <td><code class="small">{{ (m.ven_id or '')[:13] }}</code></td><td class="muted">{{ m.remote or '' }}</td><td>{{ m.http_status or '' }}</td><td class="muted">{{ m.size }}</td>
+      <td><code class="small">{{ (m.ven_id or '')[:13] }}</code></td><td class="muted">{{ m.remote or '' }}</td>
+      <td class="small">{% if m.direction == 'in' %}{% if m.tls_version %}{{ m.tls_version }} <span class="muted" title="{{ m.tls_cipher }}">{{ m.tls_cipher }}</span>{% if m.peer_fingerprint %}<br><code class="small" title="{{ m.peer_subject }}">{{ m.peer_fingerprint }}</code>{% endif %}{% else %}<span class="tag bad">plain</span>{% endif %}{% if m.signed %} <span class="tag info">signed</span>{% endif %}{% endif %}</td>
+      <td>{{ m.http_status or '' }}</td><td class="muted">{{ m.size }}</td>
       <td>{% if m.schema_error %}<span class="tag bad" title="{{ m.schema_error }}">invalid</span>{% endif %}</td>
     </tr>
-  {% else %}<tr><td colspan="9" class="muted">no messages</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="10" class="muted">no messages</td></tr>{% endfor %}
   </tbody>
 </table>
 <p class="pager">{% if page.page > 1 %}<a href="?{{ filters|dictsort|map('join', '=')|join('&') }}&page={{ page.page - 1 }}">&larr; newer</a>{% endif %}

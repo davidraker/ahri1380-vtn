@@ -6,7 +6,7 @@
 <section class="two">
   <div>
     <h2>Start a run</h2>
-    <form method="post" action="/ui/runs" class="stack">
+    <form method="post" action="/ui/runs" class="stack">{{ csrf_field }}
       {{ target_selector(tree, selected) }}
       <label>Scenario <select name="scenario_id" id="scenario">{% for sc in scenarios %}<option value="{{ sc.id }}" {{ 'selected' if sc.id == selected_scenario }} title="{{ sc.description }}">{{ sc.title }} ({{ sc.section }})</option>{% endfor %}</select></label>
       <label>Mode <select name="mode"><option value="cooling">cooling (95 F, A Full)</option><option value="heating">heating (47 F, H1)</option></select></label>

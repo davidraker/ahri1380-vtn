@@ -13,7 +13,7 @@ from ahri_vtn import spec
 from ahri_vtn.db import models
 from openleadr.messaging import parse_message, validate_xml_schema
 
-from .conftest import start_sim, ven_pk_of, wait_until
+from .conftest import csrf_token_of, start_sim, ui_session, ui_url, ven_pk_of, wait_until
 
 
 
@@ -57,7 +57,7 @@ async def test_registration_reports_and_samples(vtn, sim):
 @pytest.mark.asyncio
 async def test_event_lifecycle_and_cancel(vtn, sim):
     ven_pk = ven_pk_of(vtn)
-    event_id = vtn.events.create_event(ven_pk, "general_curtailment", duration=timedelta(seconds=60), mito=3)
+    event_id = await vtn.aio.events.create_event(ven_pk, "general_curtailment", duration=timedelta(seconds=60), mito=3)
     assert await wait_until(lambda: vtn.queries.event_responses(event_id), 10)
     resp = vtn.queries.event_responses(event_id)[0]
     assert (resp.opt_type, resp.response_code, resp.modification_number) == ("optIn", 200, 0)
@@ -67,18 +67,18 @@ async def test_event_lifecycle_and_cancel(vtn, sim):
     ev = vtn.queries.get_event(event_id)
     assert len(ev["signals"]) == 2 and {s["signal_name"] for s in ev["signals"]} == {"SIMPLE", "LOAD_CONTROL"}
 
-    assert vtn.events.cancel_event(event_id)
+    assert await vtn.aio.events.cancel_event(event_id)
     assert await wait_until(lambda: len(vtn.queries.event_responses(event_id)) >= 2, 10)
     assert vtn.queries.event_responses(event_id)[1].modification_number == 1
     assert await wait_until(lambda: sim.level == 0, 10)
     assert vtn.queries.get_event(event_id)["status"] == "cancelled"
-    assert not vtn.events.cancel_event(event_id)
+    assert not await vtn.aio.events.cancel_event(event_id)
 
 
 @pytest.mark.asyncio
 async def test_customer_override_opt(vtn, sim):
     ven_pk = ven_pk_of(vtn)
-    event_id = vtn.events.create_event(ven_pk, "critical_curtailment", duration=timedelta(seconds=60))
+    event_id = await vtn.aio.events.create_event(ven_pk, "critical_curtailment", duration=timedelta(seconds=60))
     assert await wait_until(lambda: sim.level == 2, 10)
     opt_id, (response_type, payload) = await sim.customer_override()
     assert response_type == "oadrCreatedOpt" and payload["opt_id"] == opt_id
@@ -96,7 +96,7 @@ async def test_two_capacity_unit_naks_critical_curtailment(vtn):
     try:
         assert await wait_until(lambda: vtn.queries.list_vens() and vtn.queries.list_vens()[0]["registered"], 15)
         ven_pk = ven_pk_of(vtn)
-        event_id = vtn.events.create_event(ven_pk, "critical_curtailment", duration=timedelta(seconds=60))
+        event_id = await vtn.aio.events.create_event(ven_pk, "critical_curtailment", duration=timedelta(seconds=60))
         assert await wait_until(lambda: vtn.queries.event_responses(event_id), 10)
         resp = vtn.queries.event_responses(event_id)[0]
         assert resp.opt_type == "optOut" and resp.response_code == 460
@@ -108,7 +108,7 @@ async def test_two_capacity_unit_naks_critical_curtailment(vtn):
 @pytest.mark.asyncio
 async def test_one_shot_report_request_and_cancel(vtn, sim):
     ven_pk = ven_pk_of(vtn)
-    rrid = vtn.reports.request_report(ven_pk, spec_name="x-AHRI_STATIC", one_shot=True)
+    rrid = await vtn.aio.reports.request_report(ven_pk, spec_name="x-AHRI_STATIC", one_shot=True)
 
     def status():
         with vtn.db.session() as s:
@@ -117,9 +117,9 @@ async def test_one_shot_report_request_and_cancel(vtn, sim):
     assert await wait_until(lambda: status() == ("cancelled", 1), 20), status()
 
     # Periodic request then explicit cancel
-    rrid2 = vtn.reports.request_report(ven_pk, spec_name="x-AHRI_STATUS", one_shot=False, granularity_seconds=1)
+    rrid2 = await vtn.aio.reports.request_report(ven_pk, spec_name="x-AHRI_STATUS", one_shot=False, granularity_seconds=1)
     assert await wait_until(lambda: status.__func__ if False else _rr_status(vtn, rrid2)[1] >= 2, 15)
-    assert vtn.reports.cancel_report(rrid2)
+    assert await vtn.aio.reports.cancel_report(rrid2)
     assert await wait_until(lambda: _rr_status(vtn, rrid2)[0] == "cancelled", 10)
 
 
@@ -132,7 +132,7 @@ def _rr_status(vtn, rrid):
 @pytest.mark.asyncio
 async def test_request_reregistration(vtn, sim):
     ven_pk = ven_pk_of(vtn)
-    assert vtn.registry.request_reregistration(ven_pk)
+    assert await vtn.aio.registry.request_reregistration(ven_pk)
 
     def kinds():
         with vtn.db.session() as s:
@@ -143,15 +143,16 @@ async def test_request_reregistration(vtn, sim):
 
 
 @pytest.mark.asyncio
-async def test_unknown_ven_rejected_when_not_auto_accepting():
-    from .conftest import make_config
+async def test_unknown_ven_rejected_when_not_auto_accepting(pki, tmp_path):
+    from .conftest import make_config, reset_database, stop_vtn
     from ahri_vtn.server import AhriVtn
-    config = make_config(auto_accept_unknown_vens=False)
+    config = make_config(pki, tmp_path, auto_accept_unknown_vens=False)
+    reset_database(config)
     vtn = AhriVtn(config, enable_web=False)
     await vtn.start()
     sim = None
     try:
-        vtn.registry.add_ven("known-unit")
+        await vtn.aio.registry.add_ven("known-unit")
         sim = await start_sim(vtn, ven_name="unknown-unit")
         await asyncio.sleep(2)
         assert sim.client.registration_id is None
@@ -161,15 +162,14 @@ async def test_unknown_ven_rejected_when_not_auto_accepting():
     finally:
         if sim:
             await sim.stop()
-        await vtn.stop()
-        os.remove(config.db_url.replace("sqlite:///", ""))
+        await stop_vtn(vtn)
 
 
 @pytest.mark.asyncio
 async def test_api_and_ui(vtn, sim):
     ven_pk = ven_pk_of(vtn)
-    base = f"http://127.0.0.1:{vtn.config.port}"
-    async with aiohttp.ClientSession() as http:
+    base = ui_url(vtn, "")
+    async with ui_session(vtn) as http:
         for path in ["/ui/", f"/ui/vens/{ven_pk}", "/ui/events", "/ui/messages", "/ui/messages/1", "/ui/runs",
                      "/ui/findings", "/api/status", "/api/vens", f"/api/vens/{ven_pk}", f"/api/vens/{ven_pk}/samples.csv",
                      f"/api/vens/{ven_pk}/series?minutes=5", "/api/events", "/api/messages", "/api/scenarios",
@@ -189,8 +189,10 @@ async def test_api_and_ui(vtn, sim):
             assert r.status == 201
         async with http.post(base + "/api/vens", json={"ven_name": "bench-2"}) as r:
             assert r.status == 409
+        token = await csrf_token_of(http, base + "/ui/events")
         async with http.post(base + "/ui/events", data={"ven_pk": ven_pk, "preset": "mito", "payload": "3",
-                                                        "duration_minutes": "5"}, allow_redirects=False) as r:
+                                                        "duration_minutes": "5", "csrf_token": token},
+                             allow_redirects=False) as r:
             assert r.status == 302 and "queued" in r.headers["Location"]
         async with http.get(base + f"/api/vens/{ven_pk}/samples.csv?rid=Inst%20Power") as r:
             text = await r.text()
@@ -220,7 +222,7 @@ async def test_scenarios_pass_against_simulator(vtn, sim):
         results = {}
         for scenario_id in ("tc_reg", "tc_meta", "tc_static", "tc_status", "tc_gc", "tc_cc", "tc_fc", "tc_cancel_future",
                             "tc_mito", "tc_price", "tc_rereg"):
-            run_pk = vtn.conformance.start_run(scenario_id, ven_pk, params=params)
+            run_pk = await vtn.aio.conformance.start_run(scenario_id, ven_pk, params=params)
             assert await wait_until(lambda: vtn.queries.get_run(run_pk)["status"] != "running", 120), scenario_id
             run = vtn.queries.get_run(run_pk)
             failed = [(st["name"], [a for a in st["details"]["assertions"] if a["status"] == "fail"])
@@ -243,7 +245,7 @@ async def test_scenario_abort_and_prompt(vtn, sim):
     params = {"stabilization_seconds": 1, "sample_count": 2, "sample_interval_seconds": 1, "response_timeout_seconds": 10,
               "poll_interval_seconds": 1, "operator_prompts": True, "wattmeter_prompt": True}
     assert await wait_until(lambda: vtn.queries.get_ven(ven_pk)["rated_power"], 15)
-    run_pk = vtn.conformance.start_run("tc_gc", ven_pk, params=params)
+    run_pk = await vtn.aio.conformance.start_run("tc_gc", ven_pk, params=params)
     assert await wait_until(lambda: vtn.conformance.pending_prompt(run_pk) is not None, 40)
     prompt = vtn.conformance.pending_prompt(run_pk)
     assert "wattmeter" in prompt["message"].lower()
@@ -253,7 +255,7 @@ async def test_scenario_abort_and_prompt(vtn, sim):
     assertions = [a for st in run["steps"] for a in st["details"]["assertions"]]
     assert any("Measured 3100 W" in a["message"] and a["status"] == "pass" for a in assertions)
 
-    run_pk = vtn.conformance.start_run("tc_gc", ven_pk, params=params)
+    run_pk = await vtn.aio.conformance.start_run("tc_gc", ven_pk, params=params)
     await asyncio.sleep(1)
     assert await vtn.conformance.abort_run(run_pk)
     assert vtn.queries.get_run(run_pk)["status"] == "aborted"

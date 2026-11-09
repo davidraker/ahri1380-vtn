@@ -8,7 +8,7 @@ Optionally give it an OpenADR <code>groupID</code>: events sent to whole-VEN mem
 <section class="two">
   <div>
     <h2>{{ 'Edit group' if edit else 'New group' }}</h2>
-    <form method="post" action="/ui/groups" class="stack">
+    <form method="post" action="/ui/groups" class="stack">{{ csrf_field }}
       {% if edit %}<input type="hidden" name="group_pk" value="{{ edit.id }}">{% endif %}
       <label>Name <input name="name" required value="{{ edit.name if edit else '' }}"></label>
       <label>Description <input name="description" value="{{ edit.description or '' if edit else '' }}"></label>
@@ -26,7 +26,7 @@ Optionally give it an OpenADR <code>groupID</code>: events sent to whole-VEN mem
             <td class="actions"><a class="btn small" href="/ui/groups?edit={{ g.id }}">edit</a>
                 <a class="btn small" href="/ui/events?group={{ g.id }}">send event</a>
                 <a class="btn small" href="/ui/runs?group={{ g.id }}">run test</a>
-                <form method="post" action="/ui/groups/{{ g.id }}/delete" onsubmit="return confirm('Delete this group?')"><button class="btn small danger">delete</button></form></td></tr>
+                <form method="post" action="/ui/groups/{{ g.id }}/delete" data-confirm="Delete this group?">{{ csrf_field }}<button class="btn small danger">delete</button></form></td></tr>
       {% else %}<tr><td colspan="5" class="muted">no groups yet</td></tr>{% endfor %}</tbody>
     </table>
   </div>

@@ -202,6 +202,9 @@ class EventManager:
     # ------------------------------------------------------------------ callbacks from OpenLEADR
 
     async def _on_event_delivered(self, event_id):
+        await self.vtn.db.run(self._event_delivered, event_id)
+
+    def _event_delivered(self, event_id):
         with self.vtn.db.session() as s:
             ev = s.scalar(select(models.Event).where(models.Event.event_id == event_id))
             ven_pk = ev.ven_pk if ev else None
@@ -209,6 +212,11 @@ class EventManager:
 
     async def _on_event_response(self, ven_id, event_id, opt_type, response_code=None,
                                  response_description=None, modification_number=None, request_id=None):
+        await self.vtn.db.run(self._event_response, ven_id, event_id, opt_type, response_code,
+                              response_description, modification_number, request_id)
+
+    def _event_response(self, ven_id, event_id, opt_type, response_code=None,
+                        response_description=None, modification_number=None, request_id=None):
         now = utcnow()
         with self.vtn.db.session() as s:
             ev = s.scalar(select(models.Event).where(models.Event.event_id == event_id))
@@ -235,6 +243,9 @@ class EventManager:
         return None
 
     async def on_create_opt(self, payload):
+        return await self.vtn.db.run(self._create_opt, payload)
+
+    def _create_opt(self, payload):
         ven_id = payload.get("ven_id")
         now = utcnow()
         resource_id = self._first_resource_target(payload.get("targets"))
@@ -257,6 +268,9 @@ class EventManager:
                     f"for event {payload.get('event_id')}")
 
     async def on_cancel_opt(self, payload):
+        return await self.vtn.db.run(self._cancel_opt, payload)
+
+    def _cancel_opt(self, payload):
         ven_id = payload.get("ven_id")
         with self.vtn.db.session() as s:
             ven = s.scalar(select(models.Ven).where(models.Ven.ven_id == ven_id))

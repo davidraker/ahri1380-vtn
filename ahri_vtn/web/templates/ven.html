@@ -19,12 +19,27 @@
       <tr><th>Last poll</th><td>{{ ven.last_poll_at|ago }} ({{ ven.poll_count }} polls)</td></tr>
       <tr><th>Samples stored</th><td>{{ ven.sample_count }} &middot; <a href="/api/vens/{{ ven.id }}/samples.csv">CSV (all)</a> &middot; <a href="/api/vens/{{ ven.id }}/samples.csv?minutes=1440">last 24h</a></td></tr>
     </table>
+    <h2>Client certificate</h2>
+    <table class="kv">
+      <tr><th>Pinned fingerprint</th><td>{% if ven.fingerprint %}<code>{{ ven.fingerprint }}</code> <span class="tag muted">{{ ven.fingerprint_source or '' }}</span> <span class="muted small">{{ ven.fingerprint_set_at|ago }}</span>{% else %}<span class="tag {{ 'warn' if security.tls_mode == 'mutual' else 'muted' }}">none</span>{% endif %}</td></tr>
+      {% if ven.cert_subject %}
+      <tr><th>Subject / issuer</th><td>{{ ven.cert_subject }}<br><span class="muted small">{{ ven.cert_issuer }}</span></td></tr>
+      <tr><th>Key / validity</th><td>{{ ven.cert_key_type }} {{ ven.cert_key_bits }} bits &middot; {{ ven.cert_not_before|ts }} to {{ ven.cert_not_after|ts }}</td></tr>
+      <tr><th>SHA-256</th><td><code class="small">{{ ven.fingerprint_sha256 }}</code></td></tr>
+      {% endif %}
+      <tr><th>Last connection</th><td>{{ ven.last_tls_version or '-' }} {{ ven.last_tls_cipher or '' }}{% if ven.last_remote %} <span class="muted">from {{ ven.last_remote }}</span>{% endif %}</td></tr>
+    </table>
+    <form method="post" action="/ui/vens/{{ ven.id }}/pin-fingerprint" class="inline">{{ csrf_field }}
+      <input name="fingerprint" placeholder="fingerprint XX:XX:...:XX or SHA-256" size="34" required>
+      <button class="btn small">{{ 'Re-pin' if ven.fingerprint else 'Pin' }} fingerprint</button>
+      {% if ven.fingerprint %}</form><form method="post" action="/ui/vens/{{ ven.id }}/clear-certificate" class="inline" data-confirm="Forget the pinned certificate? The device must be pinned again before it can register.">{{ csrf_field }}<button class="btn small danger">Clear</button>{% endif %}
+    </form>
     <div class="actions">
-      <form method="post" action="/ui/vens/{{ ven.id }}/request-reregistration" class="inline"><button class="btn">Request re-registration</button></form>
-      <form method="post" action="/ui/vens/{{ ven.id }}/toggle" class="inline"><button class="btn">{{ 'Disable' if ven.enabled else 'Enable' }}</button></form>
-      <form method="post" action="/ui/vens/{{ ven.id }}/delete" class="inline" onsubmit="return confirm('Delete this VEN and all its data?')"><button class="btn danger">Delete</button></form>
+      <form method="post" action="/ui/vens/{{ ven.id }}/request-reregistration" class="inline">{{ csrf_field }}<button class="btn">Request re-registration</button></form>
+      <form method="post" action="/ui/vens/{{ ven.id }}/toggle" class="inline">{{ csrf_field }}<button class="btn">{{ 'Disable' if ven.enabled else 'Enable' }}</button></form>
+      <form method="post" action="/ui/vens/{{ ven.id }}/delete" class="inline" data-confirm="Delete this VEN and all its data?">{{ csrf_field }}<button class="btn danger">Delete</button></form>
     </div>
-    <form method="post" action="/ui/vens/{{ ven.id }}/notes" class="notes">
+    <form method="post" action="/ui/vens/{{ ven.id }}/notes" class="notes">{{ csrf_field }}
       <textarea name="notes" rows="2" placeholder="Notes (vendor, model, lab setup...)">{{ ven.notes or '' }}</textarea>
       <button class="btn small">Save notes</button>
     </form>
@@ -40,7 +55,7 @@
       <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Sample time</th><th>Received</th></tr></thead>
       <tbody>{% for r in ven.status_rows %}<tr><td>{{ r.rid }}</td><td><strong>{{ r.value|num }}</strong></td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|time }}</td><td class="muted">{{ r.received_at|ago }}</td></tr>{% endfor %}</tbody>
     </table>
-    <form method="post" action="/ui/vens/{{ ven.id }}/request-report" class="inline">
+    <form method="post" action="/ui/vens/{{ ven.id }}/request-report" class="inline">{{ csrf_field }}
       <select name="resource_id"><option value="">whole VEN (all matching reports)</option>{% for r in ven.resources %}<option value="{{ r.resource_id }}">{{ r.resource_id }}</option>{% endfor %}</select>
       <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
       <label><input type="checkbox" name="one_shot" value="1" checked> one shot</label>
@@ -101,7 +116,7 @@
 <section class="two">
   <div data-live>
     <h2>Events</h2>
-    <form method="post" action="/ui/events" class="event-form">
+    <form method="post" action="/ui/events" class="event-form">{{ csrf_field }}
       <input type="hidden" name="back" value="/ui/vens/{{ ven.id }}">
       {{ target_selector(tree, selected, compact=True) }}
       <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
@@ -125,7 +140,7 @@
           <td>{% for s in e.signals %}<div class="small">{{ s.signal_name }}:{{ s.signal_type }} = {% if s.intervals|length == 1 %}{{ s.intervals[0].payload }}{% else %}{{ s.intervals|length }} intervals{% endif %}</div>{% endfor %}</td>
           <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} <span class="muted">m{{ e.modification_number }}</span>{% endif %}</td>
           <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }}{% if r.response_code != 200 %} {{ spec.RESPONSE_CODES.get(r.response_code, '') }}{% endif %} <span class="muted">m{{ r.modification_number }} {{ r.received_at|time }}</span></div>{% else %}<span class="muted">no response yet</span>{% endfor %}</td>
-          <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/vens/{{ ven.id }}"><button class="btn small">cancel</button></form>{% endif %}</td>
+          <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel">{{ csrf_field }}<input type="hidden" name="back" value="/ui/vens/{{ ven.id }}"><button class="btn small">cancel</button></form>{% endif %}</td>
         </tr>
       {% else %}<tr><td colspan="7" class="muted">no events sent yet</td></tr>{% endfor %}
       </tbody>
@@ -166,7 +181,7 @@
       <tbody>{% for r in ven.report_requests %}
         <tr><td>{{ r.spec_name or r.report_specifier_id }}<br><code class="small muted">{{ r.report_request_id[:8] }}</code></td><td>{{ r.granularity_seconds|duration }}</td><td>{{ 'one shot' if r.one_shot else 'periodic' }}</td>
             <td><span class="tag {{ r.status|status_class }}">{{ r.status }}</span></td><td>{{ r.update_count }}{% if r.last_update_at %} <span class="muted">{{ r.last_update_at|ago }}</span>{% endif %}</td><td>{{ r.requested_at|time }}</td><td>{{ r.source }}</td>
-            <td>{% if r.status in ('queued', 'created', 'active') %}<form method="post" action="/ui/vens/{{ ven.id }}/cancel-report"><input type="hidden" name="report_request_id" value="{{ r.report_request_id }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
+            <td>{% if r.status in ('queued', 'created', 'active') %}<form method="post" action="/ui/vens/{{ ven.id }}/cancel-report">{{ csrf_field }}<input type="hidden" name="report_request_id" value="{{ r.report_request_id }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
       {% else %}<tr><td colspan="8" class="muted">none</td></tr>{% endfor %}</tbody>
     </table>
 
@@ -176,7 +191,7 @@
     </table>
 
     <h2>Run a conformance test</h2>
-    <form method="post" action="/ui/runs" class="inline">
+    <form method="post" action="/ui/runs" class="inline">{{ csrf_field }}
       <input type="hidden" name="target" value="ven:{{ ven.id }}">
       <select name="scenario_id">{% for sc in scenarios %}<option value="{{ sc.id }}">{{ sc.title }}</option>{% endfor %}</select>
       <select name="mode"><option value="cooling">cooling</option><option value="heating">heating</option></select>

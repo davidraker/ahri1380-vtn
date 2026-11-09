@@ -1,0 +1,30 @@
+# systemd unit for the AHRI 1380 VTN test tool.
+#   install:  sudo cp deploy/ahri-vtn.service /etc/systemd/system/ && sudo systemctl enable --now ahri-vtn
+# The service runs as an unprivileged user and binds port 443 through CAP_NET_BIND_SERVICE.
+[Unit]
+Description=AHRI 1380 OpenADR 2.0b VTN test tool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ahri-vtn
+Group=ahri-vtn
+WorkingDirectory=/opt/ahri-vtn
+# Passphrases, API tokens and the database password come from the environment, never from config.toml:
+EnvironmentFile=-/etc/ahri-vtn/env
+ExecStartPre=/opt/ahri-vtn/.venv/bin/ahri-vtn tls-selfcheck --config /etc/ahri-vtn/config.toml
+ExecStart=/opt/ahri-vtn/.venv/bin/ahri-vtn run --config /etc/ahri-vtn/config.toml
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ahri-vtn/data
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

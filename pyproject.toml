@@ -11,16 +11,23 @@ requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 dependencies = [
     "openleadr",            # installed editable from ./openleadr-python (branch ahri-1380)
-    "aiohttp>=3.8",
+    "aiohttp>=3.9",
     "SQLAlchemy>=2.0",
+    "aiosqlite>=0.20",      # asynchronous SQLite driver (non-blocking database access)
+    "greenlet>=3.0",        # SQLAlchemy's sync-in-async bridge
     "Jinja2>=3.0",
+    "MarkupSafe>=2.1",
     "pydantic>=2.0",
     "APScheduler>=3.9,<4",
+    "cryptography>=42",     # lab PKI, certificate inspection, fingerprints
+    "lxml>=5.0",            # hardened XML parsing (resolve_entities=False, no_network)
+    "signxml>=4.0",         # XML signature verification fixes (2025)
     "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-timeout"]
+postgres = ["psycopg[binary]>=3.1"]     # pip install -e ".[postgres]" for db_url = postgresql://...
 
 [project.scripts]
 ahri-vtn = "ahri_vtn.__main__:main"

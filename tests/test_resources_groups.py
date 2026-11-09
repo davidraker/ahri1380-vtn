@@ -37,7 +37,7 @@ async def test_multi_resource_discovery_and_targeting(vtn):
         assert await wait_until(lambda: vtn.queries.get_resource(fleet_ven["id"], "u2")["rated_power"] == 4800.0, 15)
 
         # Event targeted at one resource only affects that unit
-        result = vtn.events.dispatch_event(Selection.resource(fleet_ven["id"], "u2"), "general_curtailment",
+        result = await vtn.aio.events.dispatch_event(Selection.resource(fleet_ven["id"], "u2"), "general_curtailment",
                                            duration=timedelta(seconds=60))
         assert list(result["events"]) == [fleet_ven["id"]]
         event_id = result["events"][fleet_ven["id"]]
@@ -53,18 +53,18 @@ async def test_multi_resource_discovery_and_targeting(vtn):
         # Resource-level event listing: u2 sees it, u1 does not
         assert any(e["event_id"] == event_id for e in vtn.queries.list_events(ven_pk=fleet_ven["id"], resource_id="u2"))
         assert not any(e["event_id"] == event_id for e in vtn.queries.list_events(ven_pk=fleet_ven["id"], resource_id="u1"))
-        assert vtn.events.cancel_dispatch(result["dispatch_pk"]) == 1
+        assert await vtn.aio.events.cancel_dispatch(result["dispatch_pk"]) == 1
         assert await wait_until(lambda: fleet.units["u2"].level == 0, 10)
 
         # A group spanning a resource of one VEN and the whole other VEN, signalling a groupID
-        group = vtn.groups.save_group("Bay A", {"vens": [{"ven_pk": fleet_ven["id"], "resource_ids": ["u1"]},
+        group = await vtn.aio.groups.save_group("Bay A", {"vens": [{"ven_pk": fleet_ven["id"], "resource_ids": ["u1"]},
                                                         {"ven_pk": single_ven["id"]}]},
                                       signal_group_id="lab-a")
         assert group["summary"] == "fleet (u1); single (whole VEN)"
         targets = Selection(groups=[group["id"]]).resolve(vtn.db)
         assert [(t.ven_name, t.resource_ids, t.group_ids) for t in targets] == \
             [("fleet", ["u1"], []), ("single", None, ["lab-a"])]
-        result = vtn.events.dispatch_event(Selection(groups=[group["id"]]), "critical_curtailment",
+        result = await vtn.aio.events.dispatch_event(Selection(groups=[group["id"]]), "critical_curtailment",
                                            duration=timedelta(seconds=60))
         assert set(result["events"]) == {fleet_ven["id"], single_ven["id"]}
         assert await wait_until(lambda: all(vtn.queries.event_responses(e) for e in result["events"].values()), 10)
@@ -79,19 +79,19 @@ async def test_multi_resource_discovery_and_targeting(vtn):
         assert {"group_id": "lab-a"} in ev_single["targets"] and {"ven_id": single_ven["ven_id"]} in ev_single["targets"]
         dispatch = vtn.queries.get_dispatch(result["dispatch_pk"])
         assert dispatch["live"] and len(dispatch["events"]) == 2
-        assert vtn.events.cancel_dispatch(result["dispatch_pk"]) == 2
+        assert await vtn.aio.events.cancel_dispatch(result["dispatch_pk"]) == 2
         assert await wait_until(lambda: single.level == 0 and all(u.level == 0 for u in fleet.units.values()), 10)
 
         # Whole-VEN event reaches every unit of the fleet
-        result = vtn.events.dispatch_event(Selection.whole_ven(fleet_ven["id"]), "general_curtailment",
+        result = await vtn.aio.events.dispatch_event(Selection.whole_ven(fleet_ven["id"]), "general_curtailment",
                                            duration=timedelta(seconds=60))
         assert await wait_until(lambda: all(u.level == 1 for u in fleet.units.values()), 10)
         assert single.level == 0
-        vtn.events.cancel_dispatch(result["dispatch_pk"])
+        await vtn.aio.events.cancel_dispatch(result["dispatch_pk"])
         assert await wait_until(lambda: all(u.level == 0 for u in fleet.units.values()), 10)
 
         # Event to a resource the VEN does not have is refused with 462
-        result = vtn.events.dispatch_event(Selection.resource(fleet_ven["id"], "nope"), "general_curtailment",
+        result = await vtn.aio.events.dispatch_event(Selection.resource(fleet_ven["id"], "nope"), "general_curtailment",
                                            duration=timedelta(seconds=60))
         event_id = result["events"][fleet_ven["id"]]
         assert await wait_until(lambda: vtn.queries.event_responses(event_id), 10)
@@ -99,7 +99,7 @@ async def test_multi_resource_discovery_and_targeting(vtn):
         assert (resp.opt_type, resp.response_code) == ("optOut", 462)
 
         # Resource-targeted override is attributed to the resource
-        result = vtn.events.dispatch_event(Selection.resource(fleet_ven["id"], "u3"), "general_curtailment",
+        result = await vtn.aio.events.dispatch_event(Selection.resource(fleet_ven["id"], "u3"), "general_curtailment",
                                            duration=timedelta(seconds=60))
         assert await wait_until(lambda: fleet.units["u3"].level == 1, 10)
         await fleet.customer_override(resource_id="u3")
@@ -107,7 +107,7 @@ async def test_multi_resource_discovery_and_targeting(vtn):
         assert opts[0].resource_id == "u3" and opts[0].opt_type == "optOut"
         assert await wait_until(lambda: vtn.queries.get_resource(fleet_ven["id"], "u3")["status"]["Override State"] == 1, 10)
         assert vtn.queries.get_resource(fleet_ven["id"], "u1")["status"]["Override State"] == 0
-        vtn.events.cancel_dispatch(result["dispatch_pk"])
+        await vtn.aio.events.cancel_dispatch(result["dispatch_pk"])
     finally:
         await fleet.stop()
         await single.stop()
@@ -119,16 +119,16 @@ async def test_selection_report_requests(vtn):
     try:
         assert await wait_until(lambda: vtn.queries.list_vens() and _ven(vtn, "fleet")["resource_ids"] == ["u1", "u2"], 15)
         fleet_ven = _ven(vtn, "fleet")
-        result = vtn.reports.request_reports(Selection.resource(fleet_ven["id"], "u2"), "x-AHRI_STATIC", one_shot=True)
+        result = await vtn.aio.reports.request_reports(Selection.resource(fleet_ven["id"], "u2"), "x-AHRI_STATIC", one_shot=True)
         assert len(result["report_request_ids"]) == 1 and not result["errors"]
         rrid = result["report_request_ids"][0]
         with vtn.db.session() as s:
             rr = s.scalar(select(models.ReportRequest).where(models.ReportRequest.report_request_id == rrid))
             assert rr.resource_id == "u2" and rr.report_specifier_id == "u2-x-AHRI_STATIC" and rr.dispatch_pk is not None
 
-        result = vtn.reports.request_reports(Selection.whole_ven(fleet_ven["id"]), "x-AHRI_STATUS", one_shot=True)
+        result = await vtn.aio.reports.request_reports(Selection.whole_ven(fleet_ven["id"]), "x-AHRI_STATUS", one_shot=True)
         assert len(result["report_request_ids"]) == 2        # one status report per unit
-        result = vtn.reports.request_reports(Selection.whole_ven(fleet_ven["id"]), "x-NOPE", one_shot=True)
+        result = await vtn.aio.reports.request_reports(Selection.whole_ven(fleet_ven["id"]), "x-NOPE", one_shot=True)
         assert result["report_request_ids"] == [] and result["errors"]
         assert vtn.queries.list_dispatches(kind="report_request")
     finally:
@@ -145,7 +145,7 @@ async def test_scenarios_on_group_and_whole_fleet(vtn):
                                 all(v["registered"] for v in vtn.queries.list_vens()) and
                                 _ven(vtn, "fleet")["resource_ids"] == ["u1", "u2"], 15)
         fleet_ven, single_ven = _ven(vtn, "fleet"), _ven(vtn, "single")
-        group = vtn.groups.save_group("mixed", {"vens": [{"ven_pk": fleet_ven["id"], "resource_ids": ["u1"]},
+        group = await vtn.aio.groups.save_group("mixed", {"vens": [{"ven_pk": fleet_ven["id"], "resource_ids": ["u1"]},
                                                         {"ven_pk": single_ven["id"]}]})
         params = {"stabilization_seconds": 4, "sample_count": 3, "sample_interval_seconds": 1,
                   "response_timeout_seconds": 10, "override_timeout_seconds": 15, "recovery_timeout_seconds": 20,
@@ -164,7 +164,7 @@ async def test_scenarios_on_group_and_whole_fleet(vtn):
         helper = asyncio.get_event_loop().create_task(override_when_prompted())
         try:
             for scenario_id in ("tc_static", "tc_status", "tc_gc", "tc_cc", "tc_cancel_future"):
-                run_pk = vtn.conformance.start_run(scenario_id, selection={"groups": [group["id"]]}, params=params)
+                run_pk = await vtn.aio.conformance.start_run(scenario_id, selection={"groups": [group["id"]]}, params=params)
                 assert await wait_until(lambda: vtn.queries.get_run(run_pk)["status"] != "running", 150), scenario_id
                 run = vtn.queries.get_run(run_pk)
                 failed = [(st["name"], [a["message"] for a in st["details"]["assertions"] if a["status"] == "fail"])
@@ -181,7 +181,7 @@ async def test_scenarios_on_group_and_whole_fleet(vtn):
             helper.cancel()
 
         # Whole fleet VEN: u2 is two-capacity, u1 is not, so the VEN opts in to Critical Curtailment and only u1 curtails
-        run_pk = vtn.conformance.start_run("tc_gc", ven_pk=fleet_ven["id"], params=params)
+        run_pk = await vtn.aio.conformance.start_run("tc_gc", ven_pk=fleet_ven["id"], params=params)
         assert await wait_until(lambda: vtn.queries.get_run(run_pk)["status"] != "running", 150)
         run = vtn.queries.get_run(run_pk)
         assert run["status"] in ("passed", "needs_review"), [(st["name"], st["status"]) for st in run["steps"]]

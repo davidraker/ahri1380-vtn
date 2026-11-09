@@ -6,8 +6,8 @@ One VEN fronts one or more HVAC units (resources). Each unit registers its own T
 simple power model, honours eiTarget venID / resourceID / groupID addressing, and can simulate a
 customer override (oadrCreateOpt). Intended for exercising and testing the AHRI VTN test tool.
 
-    python -m sim_ven.ahri_sim_ven --vtn-url http://localhost:8080/OpenADR2/Simple/2.0b --name sim-hvac \\
-        --resources hvac-1,hvac-2
+    python -m sim_ven.ahri_sim_ven --vtn-url https://vtn.lab/OpenADR2/Simple/2.0b --name sim-hvac \\
+        --cert certs/ven-sim-hvac.crt --key certs/ven-sim-hvac.key --ca-file certs/lab-ca.crt --resources hvac-1,hvac-2
 """
 from __future__ import annotations
 
@@ -143,7 +143,9 @@ class AhriSimVen:
                  status_interval: timedelta = timedelta(minutes=1), static_interval: timedelta = timedelta(hours=1),
                  text_mode: str = "payload", report_name_style: str = "x-", ven_id: Optional[str] = None,
                  running: bool = True, ramp_seconds: float = 5.0, group_ids: Optional[list] = None,
-                 unit_overrides: Optional[dict] = None):
+                 unit_overrides: Optional[dict] = None, cert: Optional[str] = None, key: Optional[str] = None,
+                 ca_file: Optional[str] = None, vtn_fingerprint: Optional[str] = None, check_hostname: bool = True,
+                 sign_messages: bool = False, ssl_context=None):
         """
         :param resource_ids: the units behind this VEN (default: [resource_id]). Each gets its own
                              x-AHRI_STATIC / x-AHRI_STATUS report.
@@ -157,6 +159,12 @@ class AhriSimVen:
                           reportSpecifierID of '<resource>-x-AHRI_STATUS'.
         :param group_ids: eiTarget groupID values this VEN has been configured to belong to.
         :param unit_overrides: {resource_id: {attribute: value}} to vary units (e.g. unloading_type).
+        :param cert, key: PEM client certificate and key for mutual TLS (OpenADR 2.0b 9.2.1.1).
+        :param ca_file: PEM bundle used to verify the VTN server certificate.
+        :param vtn_fingerprint: expected fingerprint of the VTN's signing certificate (signed VTNs only).
+        :param check_hostname: verify that the VTN certificate matches the URL host name.
+        :param sign_messages: sign outgoing messages with cert/key (OpenADR 2.0b 'High' security).
+        :param ssl_context: a prebuilt client SSLContext (tests: restrict TLS version or cipher suite).
         """
         self.ven_name = ven_name
         self.mode = mode
@@ -167,14 +175,18 @@ class AhriSimVen:
             unit = SimUnit(rid, rated_power_w, benchmark_cooling_w, benchmark_heating_w, device_type, unloading_type,
                            vendor_name, device_revision, model_number, running, ramp_seconds)
             unit.mode = mode
-            for key, value in (unit_overrides or {}).get(rid, {}).items():
-                setattr(unit, key, value)
+            for attr, value in (unit_overrides or {}).get(rid, {}).items():
+                setattr(unit, attr, value)
             unit.recompute()
             self.units[rid] = unit
         self._tick_task = None
         self.last_opt_response = None
 
-        self.client = OpenADRClient(ven_name=ven_name, vtn_url=vtn_url, ven_id=ven_id)
+        self.client = OpenADRClient(ven_name=ven_name, vtn_url=vtn_url, ven_id=ven_id, cert=cert, key=key,
+                                    ca_file=ca_file, vtn_fingerprint=vtn_fingerprint, check_hostname=check_hostname,
+                                    disable_signature=not sign_messages, show_fingerprint=False,
+                                    ssl_context=ssl_context)
+        self.signs_messages = sign_messages
         self.client.add_handler("on_event", self.on_event)
         self.client.add_handler("on_update_event", self.on_update_event)
         for unit in self.units.values():
@@ -459,7 +471,7 @@ def _control_app(sim: AhriSimVen):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Simulated AHRI 1380 VEN")
-    parser.add_argument("--vtn-url", default="http://localhost:8080/OpenADR2/Simple/2.0b")
+    parser.add_argument("--vtn-url", default="https://localhost/OpenADR2/Simple/2.0b")
     parser.add_argument("--name", default="sim-hvac")
     parser.add_argument("--resource-id", default="hvac-1")
     parser.add_argument("--resources", help="comma separated resource ids for a multi-unit VEN (overrides --resource-id)")
@@ -472,8 +484,36 @@ def main(argv=None):
     parser.add_argument("--report-name-style", choices=["x-", "telemetry"], default="x-")
     parser.add_argument("--group-ids", help="comma separated eiTarget groupIDs this VEN belongs to")
     parser.add_argument("--control-port", type=int, default=0, help="HTTP control port (0 = disabled)")
+    parser.add_argument("--control-host", default="127.0.0.1", help="bind address of the control port")
     parser.add_argument("--idle", action="store_true", help="start with no thermostat demand")
+    tls = parser.add_argument_group("TLS (OpenADR 2.0b security)")
+    tls.add_argument("--cert", help="PEM client certificate (e.g. certs/ven-sim-hvac.crt)")
+    tls.add_argument("--key", help="PEM private key for --cert")
+    tls.add_argument("--ca-file", help="PEM CA bundle to verify the VTN (e.g. certs/lab-ca.crt)")
+    tls.add_argument("--vtn-fingerprint", help="expected fingerprint of the VTN signing certificate")
+    tls.add_argument("--no-check-hostname", action="store_true", help="do not match the VTN certificate to the host name")
+    tls.add_argument("--sign-messages", action="store_true", help="XML-sign outgoing messages with --cert/--key")
+    tls.add_argument("--tls-max-version", choices=["1.2", "1.3"], help="cap the TLS version offered (conformance checks)")
+    tls.add_argument("--cipher", help="offer only this OpenSSL cipher suite, e.g. AES128-SHA256 (conformance checks)")
+    tls.add_argument("--insecure", action="store_true", help="plain-HTTP VTN (development): allow http:// URLs")
     args = parser.parse_args(argv)
+    if args.vtn_url.startswith("http://") and not args.insecure:
+        parser.error("the VTN URL is plain http://; pass --insecure to talk to a development VTN without TLS")
+    ssl_context = None
+    if args.tls_max_version or args.cipher:
+        import ssl
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        if args.ca_file:
+            ssl_context.load_verify_locations(args.ca_file)
+        else:
+            ssl_context.load_default_certs()
+        if args.cert:
+            ssl_context.load_cert_chain(args.cert, args.key)
+        ssl_context.check_hostname = not args.no_check_hostname
+        if args.tls_max_version == "1.2":
+            ssl_context.maximum_version = ssl.TLSVersion.TLSv1_2
+        if args.cipher:
+            ssl_context.set_ciphers(args.cipher)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     logging.getLogger("apscheduler").setLevel(logging.WARNING)
 
@@ -482,7 +522,10 @@ def main(argv=None):
                      rated_power_w=args.rated_power, device_type=args.device_type, unloading_type=args.unloading_type,
                      mode=args.mode, status_interval=timedelta(seconds=args.status_interval), text_mode=args.text_mode,
                      report_name_style=args.report_name_style, running=not args.idle,
-                     group_ids=[g.strip() for g in args.group_ids.split(",") if g.strip()] if args.group_ids else None)
+                     group_ids=[g.strip() for g in args.group_ids.split(",") if g.strip()] if args.group_ids else None,
+                     cert=args.cert, key=args.key, ca_file=args.ca_file, vtn_fingerprint=args.vtn_fingerprint,
+                     check_hostname=not args.no_check_hostname, sign_messages=args.sign_messages,
+                     ssl_context=ssl_context)
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -493,8 +536,9 @@ def main(argv=None):
             from aiohttp import web
             runner = web.AppRunner(_control_app(sim))
             loop.run_until_complete(runner.setup())
-            loop.run_until_complete(web.TCPSite(runner, "0.0.0.0", args.control_port).start())
-            logger.info(f"Control interface on http://localhost:{args.control_port}/state")
+            loop.run_until_complete(web.TCPSite(runner, args.control_host, args.control_port).start())
+            logger.info(f"Control interface on http://{args.control_host}:{args.control_port}/state (unauthenticated; "
+                        "keep it on localhost)")
         loop.run_forever()
     except KeyboardInterrupt:
         pass

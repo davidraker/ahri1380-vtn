@@ -15,7 +15,7 @@
       <tr><th>Samples stored</th><td>{{ res.sample_count }} &middot; <a href="/api/vens/{{ res.ven_pk }}/samples.csv?resource={{ res.resource_id|urlencode }}">CSV</a></td></tr>
       <tr><th>Groups</th><td>{{ res.groups|join(', ') if res.groups else '-' }}</td></tr>
     </table>
-    <form method="post" action="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}/notes" class="notes">
+    <form method="post" action="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}/notes" class="notes">{{ csrf_field }}
       <input name="label" placeholder="label (e.g. bay 3, serial ...)" value="{{ res.label or '' }}">
       <textarea name="notes" rows="2" placeholder="Notes">{{ res.notes or '' }}</textarea>
       <button class="btn small">Save</button>
@@ -30,7 +30,7 @@
       <thead><tr><th>rID</th><th>Value</th><th>Meaning</th><th>Sample time</th><th>Received</th></tr></thead>
       <tbody>{% for r in res.status_rows %}<tr><td>{{ r.rid }}</td><td><strong>{{ r.value|num }}</strong></td><td class="muted">{{ r.meaning or '' }}</td><td class="muted">{{ r.ts|time }}</td><td class="muted">{{ r.received_at|ago }}</td></tr>{% endfor %}</tbody>
     </table>
-    <form method="post" action="/ui/report-requests" class="inline">
+    <form method="post" action="/ui/report-requests" class="inline">{{ csrf_field }}
       <input type="hidden" name="target" value="res:{{ res.ven_pk }}:{{ res.resource_id }}">
       <input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}">
       <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
@@ -54,7 +54,7 @@
     </figure>
     {% endfor %}
     <h2>Run a conformance test on this resource</h2>
-    <form method="post" action="/ui/runs" class="inline">
+    <form method="post" action="/ui/runs" class="inline">{{ csrf_field }}
       <input type="hidden" name="target" value="res:{{ res.ven_pk }}:{{ res.resource_id }}">
       <select name="scenario_id">{% for sc in scenarios %}<option value="{{ sc.id }}">{{ sc.title }}</option>{% endfor %}</select>
       <select name="mode"><option value="cooling">cooling</option><option value="heating">heating</option></select>
@@ -65,7 +65,7 @@
 <section class="two">
   <div data-live>
     <h2>Send an event</h2>
-    <form method="post" action="/ui/events" class="event-form">
+    <form method="post" action="/ui/events" class="event-form">{{ csrf_field }}
       <input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}">
       {{ target_selector(tree, selected, compact=True) }}
       <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
@@ -85,7 +85,7 @@
         <tr><td>{{ e.preset_label }}<br><code class="small muted">{{ e.event_id[:8] }}</code></td><td>{{ e.target_label }}</td><td>{{ e.dtstart|time }}</td><td>{{ e.duration_seconds|duration }}</td>
             <td><span class="tag {{ e.status|status_class }}">{{ e.status }}</span></td>
             <td>{% for r in e.responses %}<div><span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }}</span> {{ r.response_code }} <span class="muted">m{{ r.modification_number }}</span></div>{% else %}<span class="muted">-</span>{% endfor %}</td>
-            <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel"><input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
+            <td>{% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel">{{ csrf_field }}<input type="hidden" name="back" value="/ui/vens/{{ res.ven_pk }}/resources/{{ res.resource_id|urlencode }}"><button class="btn small">cancel</button></form>{% endif %}</td></tr>
       {% else %}<tr><td colspan="7" class="muted">none</td></tr>{% endfor %}</tbody>
     </table>
     <h2>Customer overrides</h2>

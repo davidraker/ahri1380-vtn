@@ -9,6 +9,7 @@
 <body>
 <header class="top">
   <a class="brand" href="/ui/">AHRI 1380 VTN <span class="muted">{{ config.vtn_id }}</span></a>
+  {% if insecure %}<span class="tag bad insecure" title="tls.mode = plain: VENs are not authenticated. Development only.">INSECURE: plain HTTP</span>{% endif %}
   <nav>
     <a href="/ui/" class="{{ 'active' if path == '/ui/' }}">Dashboard</a>
     <a href="/ui/events" class="{{ 'active' if path.startswith('/ui/events') }}">Events</a>
@@ -17,14 +18,15 @@
     <a href="/ui/findings" class="{{ 'active' if path.startswith('/ui/findings') }}">Findings</a>
     <a href="/ui/messages" class="{{ 'active' if path.startswith('/ui/messages') }}">Messages</a>
   </nav>
+  {% if principal %}<span class="muted small who" title="logged in as">{{ principal.name }} <span class="tag muted">{{ principal.kind }}</span></span>{% endif %}
   <span class="live" id="live-indicator" title="Live updates">&#9679;</span>
 </header>
 <main>
 {% if flash %}<div class="flash {{ flash_kind }}">{{ flash }}</div>{% endif %}
 {% block content %}{% endblock %}
 </main>
-<footer class="muted small">OpenADR endpoint: <code>{{ config.openadr_url }}</code> &middot; schema mode: {{ config.schema_mode }}
- &middot; poll interval requested: {{ config.requested_poll_freq_seconds }}s &middot; <a href="/api/status">API</a></footer>
+<footer class="muted small">OpenADR endpoint: <code>{{ config.openadr_url }}</code> ({{ security.tls_mode }} TLS{% if security.fingerprint_policy %}, fingerprints {{ security.fingerprint_policy }}{% endif %}, signatures {{ security.signature_mode }})
+ &middot; schema mode: {{ config.schema_mode }} &middot; poll interval requested: {{ config.requested_poll_freq_seconds }}s &middot; <a href="/api/status">API</a> &middot; <a href="/api/tls">VTN certificates</a></footer>
 <script src="/ui/static/app.js"></script>
 </body>
 </html>

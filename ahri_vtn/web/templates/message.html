@@ -5,6 +5,8 @@
 <p>venID <code>{{ m.ven_id }}</code> &middot; remote {{ m.remote or '-' }} &middot; HTTP {{ m.http_status or '-' }}
  {% if m.in_reply_to %}&middot; in reply to {{ m.in_reply_to }}{% endif %}
  {% if m.pair|length > 1 %}&middot; exchange: {% for p in m.pair %}<a href="/ui/messages/{{ p.id }}" class="{{ 'current' if p.id == m.id }}">{{ p.message_type or '(empty)' }}</a>{% if not loop.last %} &harr; {% endif %}{% endfor %}{% endif %}</p>
+{% if m.direction == 'in' %}<p class="small">Transport: {% if m.tls_version %}{{ m.tls_version }}, cipher suite <code>{{ m.tls_cipher }}</code>{% if m.peer_fingerprint %}, client certificate <code>{{ m.peer_fingerprint }}</code> ({{ m.peer_subject }}){% else %}, no client certificate{% endif %}{% else %}<span class="tag bad">plain HTTP</span>{% endif %}
+ &middot; XML signature: {{ 'present' if m.signed else 'none' }}</p>{% endif %}
 {% if m.schema_error %}<div class="flash bad"><strong>XML schema violation:</strong> {{ m.schema_error }}</div>{% endif %}
 <h2>XML</h2>
 <pre class="xml">{{ pretty }}</pre>

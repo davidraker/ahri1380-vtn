@@ -9,13 +9,13 @@
 <div class="prompt">
   <h2>Operator action required</h2>
   <p>{{ prompt.message }}</p>
-  <form method="post" action="/ui/runs/{{ run.id }}/respond" class="inline">
+  <form method="post" action="/ui/runs/{{ run.id }}/respond" class="inline">{{ csrf_field }}
     {% if prompt.input %}<input name="note" placeholder="{{ prompt.input }}" size="30">{% endif %}
     {% for opt in prompt.options %}<button class="btn {{ 'primary' if loop.first }}" name="answer" value="{{ opt }}">{{ opt }}</button>{% endfor %}
   </form>
 </div>
 {% endif %}
-{% if run.status == 'running' %}<form method="post" action="/ui/runs/{{ run.id }}/abort" class="inline"><button class="btn danger">Abort run</button></form>{% endif %}
+{% if run.status == 'running' %}<form method="post" action="/ui/runs/{{ run.id }}/abort" class="inline">{{ csrf_field }}<button class="btn danger">Abort run</button></form>{% endif %}
 
 <h2>Steps</h2>
 <ol class="steps">
@@ -35,6 +35,6 @@
 {% if run.summary %}<h2>Summary</h2><pre class="json">{{ run.summary|tojson(indent=2) }}</pre>{% endif %}
 </div>
 <h2>Operator notes</h2>
-<form method="post" action="/ui/runs/{{ run.id }}/notes" class="notes"><textarea name="operator_notes" rows="3">{{ run.operator_notes or '' }}</textarea><button class="btn small">Save</button></form>
+<form method="post" action="/ui/runs/{{ run.id }}/notes" class="notes">{{ csrf_field }}<textarea name="operator_notes" rows="3">{{ run.operator_notes or '' }}</textarea><button class="btn small">Save</button></form>
 {% if run.params %}<details><summary>Parameters</summary><pre class="json">{{ run.params|tojson(indent=2) }}</pre></details>{% endif %}
 {% endblock %}

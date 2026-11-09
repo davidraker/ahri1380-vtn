@@ -61,3 +61,11 @@
     fs.addEventListener('change', sync); sync();
   });
 })();
+
+// Confirmation prompts: forms carry data-confirm instead of inline handlers (CSP: no inline script).
+(function () {
+  document.addEventListener('submit', function (e) {
+    var form = e.target;
+    if (form && form.dataset && form.dataset.confirm && !window.confirm(form.dataset.confirm)) { e.preventDefault(); }
+  });
+})();

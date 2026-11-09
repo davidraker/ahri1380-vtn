@@ -10,6 +10,34 @@
   <div class="card"><div class="big">{{ counts.runs_running }}</div><div>runs in progress</div></div>
 </section>
 
+{% if rejected %}
+<section class="rejected" data-live>
+  <h2>Refused registrations <span class="muted small">client certificate not pinned or mismatching</span></h2>
+  <table class="grid small">
+    <thead><tr><th>Time</th><th>Claimed name</th><th>Reason</th><th>Certificate</th><th>Fingerprint</th><th>From</th><th></th></tr></thead>
+    <tbody>
+    {% for r in rejected %}
+      <tr>
+        <td>{{ r.ts|ago }}</td><td>{{ r.ven_name or '-' }}</td><td><span class="tag warn">{{ r.reason }}</span></td>
+        <td class="small">{{ r.cert_subject or '-' }}<br><span class="muted">{{ r.cert_issuer or '' }}</span></td>
+        <td><code>{{ r.fingerprint or '-' }}</code></td><td class="muted">{{ r.remote or '' }}</td>
+        <td>
+          {% if r.fingerprint %}
+            {% if r.ven_pk %}
+            <form method="post" action="/ui/vens/{{ r.ven_pk }}/pin-fingerprint" class="inline-form">{{ csrf_field }}<input type="hidden" name="fingerprint" value="{{ r.fingerprint }}"><input type="hidden" name="back" value="/ui/"><button class="btn small primary">Pin to this VEN</button></form>
+            {% else %}
+            <form method="post" action="/ui/vens" class="inline-form">{{ csrf_field }}<input type="hidden" name="ven_name" value="{{ r.ven_name or '' }}"><input type="hidden" name="fingerprint" value="{{ r.fingerprint }}"><input type="hidden" name="rejected_pk" value="{{ r.id }}"><button class="btn small primary">Add VEN with this certificate</button></form>
+            {% endif %}
+          {% endif %}
+          <form method="post" action="/ui/rejected/{{ r.id }}/dismiss" class="inline-form">{{ csrf_field }}<button class="btn small">dismiss</button></form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <section>
   <h2>VENs</h2>
   <table class="grid" data-live>
@@ -30,16 +58,25 @@
         <td><a class="btn small" href="/ui/vens/{{ v.id }}">open</a></td>
       </tr>
     {% else %}
-      <tr><td colspan="11" class="muted">No VENs yet. {% if config.auto_accept_unknown_vens %}Unknown VENs are accepted automatically when they register; you can also pre-register one below.{% else %}Add the VEN name below before it registers.{% endif %}</td></tr>
+      <tr><td colspan="11" class="muted">No VENs yet. {% if security.fingerprint_policy == 'pinned' %}Add the VEN with its certificate fingerprint below before it registers (fingerprint policy: pinned), or pin the fingerprint from the refused registration that appears when it first connects.{% elif config.auto_accept_unknown_vens %}Unknown VENs are accepted automatically when they register; you can also pre-register one below.{% else %}Add the VEN name below before it registers.{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
-  <form method="post" action="/ui/vens" class="inline">
+  <form method="post" action="/ui/vens" class="inline">{{ csrf_field }}
     <input name="ven_name" placeholder="VEN name (oadrVenName)" required>
     <input name="ven_id" placeholder="fixed venID (optional)">
+    <input name="fingerprint" placeholder="certificate fingerprint XX:XX:... (optional)" size="32" title="OpenADR 2.0b 10.5.1 fingerprint (last 10 bytes of the SHA-256 of the DER certificate) or a full SHA-256 fingerprint">
     <input name="notes" placeholder="notes (vendor, model, lab bay...)">
     <button class="btn">Add VEN</button>
   </form>
+  {% if vtn_certs %}
+  <details class="small"><summary>VTN certificates to give to vendors ({{ security.tls_mode }} TLS)</summary>
+    <table class="grid small">
+      <thead><tr><th>Key</th><th>Subject</th><th>Valid for</th><th>Expires</th><th>OpenADR fingerprint</th></tr></thead>
+      <tbody>{% for c in vtn_certs %}<tr><td>{{ c.key_type }} {{ c.key_bits }}</td><td>{{ c.subject }}</td><td>{{ c.sans|join(', ') }}</td><td>{{ c.not_after|ts }}</td><td><code>{{ c.fingerprint }}</code></td></tr>{% endfor %}</tbody>
+    </table>
+  </details>
+  {% endif %}
 </section>
 
 <section class="two">

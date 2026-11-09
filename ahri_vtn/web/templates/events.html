@@ -3,7 +3,7 @@
 {% block title %}Events{% endblock %}
 {% block content %}
 <h1>Events</h1>
-<form method="post" action="/ui/events" class="event-form">
+<form method="post" action="/ui/events" class="event-form">{{ csrf_field }}
   <input type="hidden" name="back" value="/ui/events">
   {{ target_selector(tree, selected) }}
   <select name="preset" id="preset">{% for pid, p in presets.items() %}<option value="{{ pid }}" data-payload="{{ p.payload if p.payload is not none else '' }}" data-label="{{ p.payload_label }}">{{ p.label }} ({{ p.section }})</option>{% endfor %}</select>
@@ -17,7 +17,7 @@
   <input name="vtn_comment" placeholder="vtnComment" size="18">
   <button class="btn primary">Send event</button>
 </form>
-<form method="post" action="/ui/report-requests" class="inline">
+<form method="post" action="/ui/report-requests" class="inline">{{ csrf_field }}
   <input type="hidden" name="back" value="/ui/events">
   <span class="muted small">Request a report:</span>
   <select name="spec_name"><option value="x-AHRI_STATUS">x-AHRI_STATUS</option><option value="x-AHRI_STATIC">x-AHRI_STATIC</option></select>
@@ -46,10 +46,10 @@ One OpenADR event is sent per targeted VEN; its eiTarget names the VEN, the sele
           <div><a href="/ui/vens/{{ e.ven_pk }}">{{ e.ven_name }}</a> <span class="muted">({{ e.target_label }})</span> <code class="small">{{ e.event_id[:8] }}</code>
             <span class="tag {{ e.status|status_class }}">{{ e.status }}</span>{% if e.modification_number %} m{{ e.modification_number }}{% endif %}
             {% for r in e.responses %}<span class="tag {{ r.opt_type|status_class }}">{{ r.opt_type }} {{ r.response_code }} m{{ r.modification_number }}</span>{% else %}<span class="muted">no response</span>{% endfor %}
-            {% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel" class="inline-form"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel</button></form>{% endif %}
+            {% if e.status in ('far', 'near', 'active') %}<form method="post" action="/ui/events/{{ e.event_id }}/cancel" class="inline-form">{{ csrf_field }}<input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel</button></form>{% endif %}
           </div>{% endfor %}</td>
       <td>{{ d.source }}</td>
-      <td>{% if d.live %}<form method="post" action="/ui/dispatches/{{ d.id }}/cancel"><input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel all</button></form>{% endif %}</td>
+      <td>{% if d.live %}<form method="post" action="/ui/dispatches/{{ d.id }}/cancel">{{ csrf_field }}<input type="hidden" name="back" value="/ui/events"><button class="btn small">cancel all</button></form>{% endif %}</td>
     </tr>
   {% else %}<tr><td colspan="7" class="muted">no events sent yet</td></tr>{% endfor %}
   </tbody>

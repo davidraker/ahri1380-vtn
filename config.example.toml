@@ -1,17 +1,31 @@
-# AHRI 1380 VTN test tool configuration. Every value can be overridden with an
-# environment variable named AHRI_VTN_<UPPERCASE_FIELD>, e.g. AHRI_VTN_PORT=9000.
+# AHRI 1380 VTN test tool configuration.
+#
+# Secure by default: the OpenADR listener runs mutual TLS (OpenADR 2.0b "Standard" security) and
+# the operator UI is a separate TLS listener that always requires a login. A configuration that
+# cannot meet this is refused at start-up. Create the lab certificates with
+#     ahri-vtn certs quickstart --san <dns-name-or-ip-the-units-use>
+# and the operator password hash with
+#     ahri-vtn hash-password
+# Top-level values can be overridden with AHRI_VTN_<UPPERCASE_FIELD> environment variables.
 
 vtn_id = "ahri1380-vtn"
-host = "0.0.0.0"
-port = 8080
+host = "0.0.0.0"           # OpenADR listener: reachable by the equipment under test
+port = 443                 # needs CAP_NET_BIND_SERVICE or a container port mapping; 8443 is the fallback
 # http_path_prefix = "/OpenADR2/Simple/2.0b"
 
+# SQLite (default) or PostgreSQL, local or across the network. The password never goes in the URL:
+#   db_url = "postgresql://ahri_vtn@dbhost.lab:5432/ahri_vtn?sslmode=verify-full&sslrootcert=certs/db-ca.pem"
+#   db_password_env = "AHRI_VTN_DB_PASSWORD"
+# PostgreSQL needs `pip install -e ".[postgres]"`. Database access never blocks the event loop.
 db_url = "sqlite:///ahri_vtn.sqlite"
+# db_password_env = "AHRI_VTN_DB_PASSWORD"
+# db_pool_size = 5
 
 # Poll interval requested from VENs (oadrRequestedOadrPollFreq)
 requested_poll_freq_seconds = 10
 
 # Accept oadrCreatePartyRegistration from VENs that were not added through the UI first.
+# With fingerprint_policy = "pinned" this has no effect (a VEN must be pinned before it can register).
 auto_accept_unknown_vens = true
 
 # "lenient" records XML schema violations as findings but still processes the message;
@@ -41,11 +55,68 @@ override_timeout_seconds = 600
 status_interval_tolerance = 0.5       # +-50 % of the 1 minute status interval
 max_mito_degrees_f = 4                # Section 6.1.2
 
-# [tls]
-# http_cert = "certs/vtn.crt"
-# http_key = "certs/vtn.key"
-# http_ca_file = "certs/ca.crt"
+# ------------------------------------------------------------------------------------------
+# Transport security of the OpenADR listener
+# ------------------------------------------------------------------------------------------
+[tls]
+# mutual: TLS 1.2+, client certificate required (OpenADR 2.0b sections 9.2, 9.2.1.1) -- the default
+# server: TLS without a client certificate, for prototypes that cannot present one yet
+#         (every message is recorded with a tls-no-client-cert finding)
+# plain:  development against the simulator only; VENs are not authenticated; the log and the UI
+#         flag the process as INSECURE
+mode = "mutual"
+cert = "certs/vtn-rsa.crt"            # server certificate chain, RSA 2048 (PEM)
+key  = "certs/vtn-rsa.key"
+# key_passphrase_env = "AHRI_VTN_TLS_KEY_PASSPHRASE"   # name of the variable holding the passphrase
+ecc_cert = "certs/vtn-ecc.crt"        # second chain, ECC P-256: both 2.0b default cipher suites (rule 68)
+ecc_key  = "certs/vtn-ecc.key"
+# Trust bundle for VEN client certificates: the lab CA, vendor or OpenADR Alliance CAs, and pinned
+# self-signed device certificates (ahri-vtn certs bundle add <pem>)
+client_ca_file = "certs/ven-trust.pem"
+min_version = "1.2"                   # 1.2 | 1.3 (1.3 disables the two 2.0b default suites)
+# "openadr-default" = the two 2.0b suites first, then modern AEAD suites; or any OpenSSL cipher string
+ciphers = "openadr-default"
+# pinned:    a VEN must have its certificate fingerprint pinned (Add VEN form or the one-click action
+#            on a refused registration) before it can register -- recommended for lab use
+# first-use: the first certificate a new VEN presents is pinned; later changes are refused
+# ca-only:   any certificate from the trust bundle is accepted for any VEN (fingerprints recorded only)
+fingerprint_policy = "pinned"
+expiry_warning_days = 30
+# Refuse to start when a 2.0b default cipher suite cannot be negotiated on this host (rule 67).
+# Set to false only to test modern-only VENs on a host that lacks static RSA key exchange.
+require_default_suites = true
 
-# [ui]
-# basic_auth_user = "lab"
-# basic_auth_password = "secret"
+# ------------------------------------------------------------------------------------------
+# XML signatures (OpenADR 2.0b "High" security). AHRI 1380 Table 4 says XML signature use = N.
+# ------------------------------------------------------------------------------------------
+[signatures]
+mode = "none"                         # none | optional (verify when present) | required
+# cert = "certs/vtn-rsa.crt"          # the VTN signs its own messages when cert/key are given
+# key  = "certs/vtn-rsa.key"
+# key_passphrase_env = "AHRI_VTN_SIGNING_KEY_PASSPHRASE"
+
+# ------------------------------------------------------------------------------------------
+# Operator UI / API listener: always its own port, always TLS, always authenticated
+# ------------------------------------------------------------------------------------------
+[ui]
+host = "127.0.0.1"                    # local, SSH tunnel or VPN; a LAN address is a deliberate choice
+port = 9443
+# cert = ""                           # own certificate chain; empty = reuse the VTN certificate(s)
+# key  = ""
+# optional: an operator certificate logs in by itself, otherwise the password prompt appears
+# required: no connection without an operator certificate; the password becomes a second factor
+client_cert = "optional"
+operator_ca_file = "certs/operator-ca.crt"
+# OpenADR-style fingerprints of the operator certificates allowed in; empty = any from the operator CA
+operator_fingerprints = []
+password_auth = true                  # must be true when client_cert = "optional"
+basic_auth_user = "lab"
+basic_auth_password_hash = "pbkdf2_sha256$600000$REPLACE$WITH_OUTPUT_OF_ahri-vtn_hash-password"
+# api_tokens_env = "AHRI_VTN_API_TOKENS"   # comma-separated Bearer tokens for scripts (ahri-vtn gen-token)
+max_sse_clients = 20
+
+[limits]
+max_vens_auto_accept = 50
+max_message_body_bytes = 1048576
+requests_per_minute_per_ip = 600
+auth_failures_per_minute = 5
