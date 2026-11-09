@@ -1,0 +1,16 @@
+# never ship local state into an image build
+.venv/
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.sqlite*
+*.db
+certs/
+config.toml
+planning/
+test_runs/
+.pytest_cache/
+.git/
+.idea/
+.claude/

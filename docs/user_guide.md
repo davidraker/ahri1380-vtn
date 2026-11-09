@@ -50,8 +50,13 @@ git -C openleadr-python checkout ahri-1380
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
 pip install -e ./openleadr-python      # the OpenLEADR fork with the VTN extensions
-pip install -e ".[dev]"                # the tool itself (+ pytest for self-tests)
+pip install -e ".[dev]"                # the tool itself (+ pytest for self-tests); add ",postgres" for PostgreSQL
 ```
+
+Distribution notes: Debian and Ubuntu need `python3-full` (or `python3-venv`) before `python3 -m venv`
+works; Ubuntu 26.04 ships Python 3.14, on which the tool and its dependencies install and pass
+the test suite. If the checkout contains a `build/` directory from an earlier non-editable
+install, delete it first: setuptools would otherwise package the stale files it holds.
 
 Create the lab certificates and the operator password, then verify the installation:
 
