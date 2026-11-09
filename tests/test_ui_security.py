@@ -121,6 +121,8 @@ async def test_client_certificate_required_without_password(pki, tmp_path):
 
 @pytest.mark.asyncio
 async def test_operator_fingerprint_allowlist(pki, tmp_path):
+    from ahri_vtn.config import ConfigError
+    from ahri_vtn.tls import inspect_pem_file
     cfg = make_config(pki, tmp_path)
     cfg.ui.operator_fingerprints = ["00:11:22:33:44:55:66:77:88:99"]
     vtn = await start_vtn(cfg)
@@ -128,13 +130,25 @@ async def test_operator_fingerprint_allowlist(pki, tmp_path):
         async with ui_session(vtn, operator_cert=True) as http:
             async with http.get(ui_url(vtn, "/api/status")) as r:
                 assert r.status == 401          # valid CA, but not an allowed operator
-        cfg.ui.operator_fingerprints = [pki.operator_fingerprint()]
-        vtn.auth.allowed_operator_fingerprints = [pki.operator_fingerprint()]
+    finally:
+        await stop_vtn(vtn)
+    # The allow-list accepts the SHA-256 form in any case and normalises it at start-up
+    sha = inspect_pem_file(pki.path("operator-tester.crt")).sha256.lower().replace(":", "")
+    cfg = make_config(pki, tmp_path)
+    cfg2 = cfg.model_copy(update={"ui": cfg.ui.model_copy(update={"operator_fingerprints": [sha]})})
+    from ahri_vtn.config import UiConfig
+    ui = UiConfig(**{**cfg.ui.model_dump(), "operator_fingerprints": [sha]})
+    assert ui.operator_fingerprints == [pki.operator_fingerprint()]
+    cfg2 = cfg.model_copy(update={"ui": ui})
+    vtn = await start_vtn(cfg2)
+    try:
         async with ui_session(vtn, operator_cert=True) as http:
             async with http.get(ui_url(vtn, "/api/status")) as r:
                 assert r.status == 200
     finally:
         await stop_vtn(vtn)
+    with pytest.raises(Exception):
+        UiConfig(**{**cfg.ui.model_dump(), "operator_fingerprints": ["not-a-fingerprint"]})
 
 
 @pytest.mark.asyncio
@@ -263,3 +277,36 @@ async def test_rejected_registration_pin_flow_through_ui(pki, tmp_path):
             await unit.stop()
     finally:
         await stop_vtn(vtn)
+
+
+def test_csv_cells_are_neutralised():
+    from ahri_vtn.web.api import _csv_cell
+    assert _csv_cell("=HYPERLINK(1)") == "'=HYPERLINK(1)"
+    assert _csv_cell("+1") == "'+1" and _csv_cell("-1") == "'-1" and _csv_cell("@x") == "'@x"
+    assert _csv_cell("Inst Power") == "Inst Power" and _csv_cell(12.5) == 12.5 and _csv_cell(None) is None
+
+
+def test_pki_names_cannot_escape_the_directory(tmp_path, monkeypatch, capsys):
+    from ahri_vtn.__main__ import main
+    monkeypatch.chdir(tmp_path)
+    assert main(["certs", "init-ca"]) == 0
+    assert main(["certs", "ven", "--name", "../escape"]) == 2
+    assert "Invalid name" in capsys.readouterr().err
+    assert not (tmp_path / "escape.crt").exists() and not (tmp_path / "certs" / ".." / "ven-escape.crt").exists()
+    assert main(["certs", "operator", "--name", "ok-name_1", "--p12-password", "x"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_password_verification_is_cached_and_off_the_loop(vtn):
+    import time
+    async with ui_session(vtn) as http:
+        t0 = time.monotonic()
+        async with http.get(ui_url(vtn, "/api/status")) as r:
+            assert r.status == 200
+        first = time.monotonic() - t0
+        t0 = time.monotonic()
+        for _ in range(5):
+            async with http.get(ui_url(vtn, "/api/status")) as r:
+                assert r.status == 200
+        each = (time.monotonic() - t0) / 5
+    assert each < first or each < 0.05          # cached verifications skip the PBKDF2 work

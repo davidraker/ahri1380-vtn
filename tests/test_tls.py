@@ -278,6 +278,8 @@ async def test_server_mode_accepts_vens_without_certificates_but_records_it(pki,
             ven = ven_named(vtn, "proto")
             assert ven["fingerprint"] is None
             assert await wait_until(lambda: "tls-no-client-cert" in codes(vtn, ven["id"]), 5)
+            # polls and reports are served (the venID is not bound to a certificate in this mode)
+            assert await wait_until(lambda: ven_named(vtn, "proto")["status"]["Operational State"] is not None, 15)
             msg = vtn.queries.list_messages(direction="in")["items"][0]
             assert msg["tls_version"] and msg["peer_fingerprint"] is None
         finally:
@@ -308,3 +310,28 @@ async def test_plain_mode_is_explicit_and_flagged(pki, tmp_path, caplog):
             await sim.stop()
     finally:
         await stop_vtn(vtn)
+
+
+@pytest.mark.asyncio
+async def test_claimed_ven_id_from_another_certificate_leaves_no_trace_on_the_victim(vtn, sim):
+    """A 463-refused poll must not mark the claimed VEN online or raise findings on it."""
+    pki = current_pki()
+    victim = ven_named(vtn, "sim-hvac")
+    await sim.stop()
+    await asyncio.sleep(1.5)
+    before = ven_named(vtn, "sim-hvac")
+    polls_before, seen_before = before["poll_count"], before["last_seen_at"]
+    findings_before = len(vtn.queries.findings(ven_pk=victim["id"]))
+    status, body = await post_openadr(vtn, pki.client_context(ven="sim-hvac-2"), "OadrPoll",
+                                      create_message("oadrPoll", ven_id=victim["ven_id"]))
+    assert status == 200
+    from openleadr.messaging import parse_message
+    assert parse_message(body)[1]["response"]["response_code"] == 463
+    after = ven_named(vtn, "sim-hvac")
+    assert after["poll_count"] == polls_before and after["last_seen_at"] == seen_before
+    assert len(vtn.queries.findings(ven_pk=victim["id"])) == findings_before
+    # the raw message is still in the log, attributed to the claimed venID, with the real certificate
+    latest = vtn.queries.list_messages(direction="in", message_type="oadrPoll")["items"][0]
+    assert latest["peer_fingerprint"] == pki.fingerprint("sim-hvac-2")
+    rejected = vtn.registry.list_rejected()
+    assert all(r["remote"] for r in rejected) or not rejected

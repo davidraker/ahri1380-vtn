@@ -184,7 +184,8 @@ def build_parser():
     p.add_argument("--force", action="store_true")
 
     hp = sub.add_parser("hash-password", help="hash an operator password for the configuration")
-    hp.add_argument("--password", help="password (prompted when omitted)")
+    hp.add_argument("--password", help="password (prompted when omitted; the flag ends up in shell history and `ps`, "
+                                       "so prefer the prompt outside scripts)")
 
     sub.add_parser("gen-token", help="generate an API token")
 

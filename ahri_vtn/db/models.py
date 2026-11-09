@@ -51,7 +51,7 @@ class Base(DeclarativeBase):
 
 # Bump when the schema changes. The tool is not deployed, so existing databases are recreated,
 # not migrated: Database.create_all() refuses to open a file with another version.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class Meta(Base):
@@ -71,7 +71,7 @@ class Ven(Base):
     ven_id: Mapped[Optional[str]] = mapped_column(String(128), unique=True, index=True)
     registration_id: Mapped[Optional[str]] = mapped_column(String(128))
     # Client certificate identity (OpenADR 2.0b 10.5.1): the 10-byte fingerprint is the identity key
-    fingerprint: Mapped[Optional[str]] = mapped_column(String(128), index=True)
+    fingerprint: Mapped[Optional[str]] = mapped_column(String(128), unique=True, index=True)
     fingerprint_sha256: Mapped[Optional[str]] = mapped_column(String(128))
     fingerprint_source: Mapped[Optional[str]] = mapped_column(String(16))   # operator | first-use | ca-only
     fingerprint_set_at: Mapped[Optional[datetime]] = mapped_column()

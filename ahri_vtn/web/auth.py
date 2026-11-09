@@ -9,6 +9,7 @@ Security headers and a per-address rate limit are applied to every response.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -81,21 +82,30 @@ class Principal:
 
 
 class Throttle:
-    """Authentication failures per client address within a sliding minute."""
+    """Authentication failures per client address within a sliding minute (bounded memory)."""
 
     def __init__(self, limit: int):
         self.limit = limit
-        self.failures: dict[str, deque] = defaultdict(deque)
+        self.failures: dict[str, deque] = {}
 
     def blocked(self, remote: str) -> bool:
-        q = self.failures[remote]
+        q = self.failures.get(remote)
+        if not q:
+            return False
         now = time.monotonic()
         while q and now - q[0] > 60:
             q.popleft()
+        if not q:
+            del self.failures[remote]
+            return False
         return len(q) >= self.limit
 
     def record(self, remote: str):
-        self.failures[remote].append(time.monotonic())
+        self.failures.setdefault(remote, deque()).append(time.monotonic())
+        if len(self.failures) > 10000:
+            stale = [k for k, q in self.failures.items() if not q or time.monotonic() - q[-1] > 60]
+            for k in stale:
+                del self.failures[k]
 
 
 class RateLimiter:
@@ -125,7 +135,11 @@ class Authenticator:
         self.ui = config.ui
         self.secret = secrets.token_bytes(32)      # per process: CSRF tokens and flash signatures
         self.throttle = Throttle(config.limits.auth_failures_per_minute)
-        self.allowed_operator_fingerprints = [f.upper() for f in self.ui.operator_fingerprints]
+        self.allowed_operator_fingerprints = list(self.ui.operator_fingerprints)   # normalised by UiConfig
+        # PBKDF2 costs ~0.1 s; verified credentials are remembered (keyed by a keyed hash of the
+        # credentials, never the credentials) so a browser session does not pay it on every request.
+        self._verified: dict[bytes, float] = {}
+        self._verified_ttl = 600.0
 
     # ------------------------------------------------------------------ identification
 
@@ -144,7 +158,7 @@ class Authenticator:
                   evidence.peer.subject)
         return Principal("certificate", cn)
 
-    def password_principal(self, request: web.Request) -> Optional[Principal]:
+    async def password_principal(self, request: web.Request) -> Optional[Principal]:
         if not self.ui.password_auth:
             return None
         header = request.headers.get("Authorization", "")
@@ -155,8 +169,21 @@ class Authenticator:
         except (ValueError, UnicodeDecodeError):
             return None
         user_ok = hmac.compare_digest(user.encode(), (self.ui.basic_auth_user or "").encode())
-        pw_ok = verify_password(password, self.ui.basic_auth_password_hash.get_secret_value())
-        return Principal("password", user) if (user_ok and pw_ok) else None
+        if not user_ok:
+            return None
+        key = hmac.new(self.secret, f"{user}\0{password}".encode(), hashlib.sha256).digest()
+        now = time.monotonic()
+        expires = self._verified.get(key)
+        if expires is not None and expires > now:
+            return Principal("password", user)
+        # Cache miss: the slow hash runs in a worker thread so the event loop keeps serving
+        pw_ok = await asyncio.to_thread(verify_password, password, self.ui.basic_auth_password_hash.get_secret_value())
+        if not pw_ok:
+            return None
+        if len(self._verified) > 100:
+            self._verified = {k: v for k, v in self._verified.items() if v > now}
+        self._verified[key] = now + self._verified_ttl
+        return Principal("password", user)
 
     def token_principal(self, request: web.Request) -> Optional[Principal]:
         header = request.headers.get("Authorization", "")
@@ -167,7 +194,7 @@ class Authenticator:
             return Principal("token", "api")
         return None
 
-    def authenticate(self, request: web.Request) -> Optional[Principal]:
+    async def authenticate(self, request: web.Request) -> Optional[Principal]:
         """
         client_cert = "optional": an acceptable operator certificate logs in by itself; otherwise
         a Bearer token or Basic credentials are needed.
@@ -179,12 +206,12 @@ class Authenticator:
         if self.ui.client_cert == "required":
             if cert is None:
                 return None
-            if self.ui.password_auth and self.password_principal(request) is None:
+            if self.ui.password_auth and await self.password_principal(request) is None:
                 return None
             return cert
         if cert is not None:
             return cert
-        return self.token_principal(request) or self.password_principal(request)
+        return self.token_principal(request) or await self.password_principal(request)
 
     # ------------------------------------------------------------------ CSRF and flash signing
 
@@ -194,8 +221,10 @@ class Authenticator:
     def csrf_field(self, principal: Principal) -> Markup:
         return Markup(f'<input type="hidden" name="csrf_token" value="{self.csrf_token(principal)}">')
 
-    def csrf_ok(self, principal: Principal, token: Optional[str]) -> bool:
-        return bool(token) and hmac.compare_digest(token, self.csrf_token(principal))
+    def csrf_ok(self, principal: Principal, token) -> bool:
+        if not isinstance(token, str) or not token:
+            return False
+        return hmac.compare_digest(token.encode("utf-8", "replace"), self.csrf_token(principal).encode())
 
     def sign(self, text: str) -> str:
         return hmac.new(self.secret, f"flash:{text}".encode(), hashlib.sha256).hexdigest()[:24]
@@ -235,7 +264,7 @@ def make_auth_middleware(auth: Authenticator):
             logger.warning(f"Too many authentication failures from {remote}")
             return web.Response(status=429, text="Too many authentication failures; wait a minute",
                                 headers={"Retry-After": "60"})
-        principal = auth.authenticate(request)
+        principal = await auth.authenticate(request)
         if principal is None:
             auth.throttle.record(remote)
             headers = {}
@@ -246,6 +275,7 @@ def make_auth_middleware(auth: Authenticator):
         request["principal"] = principal
 
         if request.method in STATE_CHANGING:
+            logger.info(f"audit: {principal} {request.method} {request.path} from {remote}")
             if not _same_origin(request):
                 logger.warning(f"Cross-origin {request.method} {request.path} from {remote} refused")
                 return web.Response(status=403, text="Cross-origin request refused")

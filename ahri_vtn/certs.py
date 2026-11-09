@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 import ipaddress
 import os
+import re
 import secrets
 import sys
 from pathlib import Path
@@ -52,6 +53,16 @@ class CertsError(RuntimeError):
     pass
 
 
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def safe_name(name: str) -> str:
+    """Certificate names become file names: letters, digits, dot, underscore, dash only."""
+    if not NAME_RE.match(name or "") or ".." in name:
+        raise CertsError(f"Invalid name {name!r}: use letters, digits, '.', '_' or '-' (no path separators)")
+    return name
+
+
 # ---------------------------------------------------------------------------------------------
 # Primitives
 # ---------------------------------------------------------------------------------------------
@@ -69,10 +80,13 @@ def _ecc():
     return ec.generate_private_key(ec.SECP256R1())
 
 
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+
+
 def _write_key(path: Path, key, passphrase: Optional[str] = None):
     enc = serialization.BestAvailableEncryption(passphrase.encode()) if passphrase else serialization.NoEncryption()
     data = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, enc)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
     os.chmod(path, 0o600)
@@ -137,7 +151,7 @@ def _leaf(key, cn: str, ca_key, ca_cert: x509.Certificate, *, server: bool, sans
 def _p12(path: Path, name: str, key, cert: x509.Certificate, ca_cert: x509.Certificate, password: str):
     data = pkcs12.serialize_key_and_certificates(name.encode(), key, cert, [ca_cert],
                                                  serialization.BestAvailableEncryption(password.encode()))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as fh:
         fh.write(data)
 
@@ -198,6 +212,7 @@ class LabPki:
         return results
 
     def ven(self, name: str, ecc: bool = False, p12_password: Optional[str] = None, days: int = LEAF_DAYS):
+        name = safe_name(name)
         ca_key = _load_key(self._require("lab-ca.key"))
         ca_cert = _load_cert(self._require("lab-ca.crt"))
         key = _ecc() if ecc else _rsa(2048)
@@ -213,6 +228,7 @@ class LabPki:
         return info
 
     def operator(self, name: str, p12_password: Optional[str] = None, days: int = LEAF_DAYS):
+        name = safe_name(name)
         ca_key = _load_key(self._require("operator-ca.key"))
         ca_cert = _load_cert(self._require("operator-ca.crt"))
         key = _rsa(2048)

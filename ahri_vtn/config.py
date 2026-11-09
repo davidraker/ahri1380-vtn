@@ -12,7 +12,9 @@ import os
 from pathlib import Path
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator, model_validator
+
+from .fingerprint import normalize_fingerprint
 
 try:                        # Python 3.11+
     import tomllib as _toml
@@ -113,6 +115,14 @@ class UiConfig(BaseModel):
     api_tokens_env: Optional[str] = None
     max_sse_clients: int = 20
 
+    @field_validator("operator_fingerprints")
+    @classmethod
+    def _normalise_fingerprints(cls, values):
+        try:
+            return [normalize_fingerprint(v) for v in values]
+        except ValueError as err:
+            raise ValueError(f"[ui] operator_fingerprints: {err}") from None
+
     def key_passphrase(self) -> Optional[str]:
         return os.environ.get(self.key_passphrase_env) if self.key_passphrase_env else None
 
@@ -128,7 +138,7 @@ class LimitsConfig(BaseModel):
 
     max_vens_auto_accept: int = 50
     max_message_body_bytes: int = 1024 * 1024
-    requests_per_minute_per_ip: int = 600
+    requests_per_minute_per_ip: int = 3000     # ~50/s: a fleet of VENs behind one NAT address stays well below
     auth_failures_per_minute: int = 5
 
 

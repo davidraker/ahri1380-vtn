@@ -596,6 +596,21 @@ container image runs it at build time). The recommended runtime is the pinned co
 (`Dockerfile`, Debian 12, OpenSSL 3.0 LTS); on a bare host prefer Debian 12 or Ubuntu 24.04 LTS,
 or Fedora/RHEL with the explicit cipher list as shipped.
 
+### 13.6a Known limitations
+
+- **No revocation checking.** Neither trust store consults CRLs or OCSP. To exclude a device,
+  clear or re-pin its fingerprint (pinned / first-use policies) or remove its CA from the trust
+  bundle; in `ca-only` mode removing the CA is the only lever.
+- **`server` mode does not verify venIDs.** Without client certificates a message's venID is taken
+  as sent, as on plain HTTP; the mode exists for prototypes and is flagged with
+  `tls-no-client-cert` findings. In `mutual` mode a message whose certificate is not the one pinned
+  to the claimed venID is answered 463 and leaves no trace on that VEN's record (the raw message is
+  kept with the real certificate's fingerprint).
+- **Form tokens live as long as the process.** CSRF tokens are derived from a per-process secret and
+  the logged-in principal; restart the VTN to invalidate them.
+- **`ahri-vtn hash-password --password`** puts the password in the shell history and process list;
+  use the interactive prompt except in scripts.
+
 ### 13.7 Deployment checklist
 
 - Build or install on the target host and run `ahri-vtn tls-selfcheck`.

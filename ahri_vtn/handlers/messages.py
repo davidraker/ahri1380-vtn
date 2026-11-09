@@ -72,6 +72,18 @@ class MessageLogger:
 
     # ------------------------------------------------------------------ transport findings
 
+    def _vouched(self, ven: models.Ven, tls: Optional[TlsEvidence]) -> bool:
+        """
+        Whether the connection identifies this VEN: in mutual mode the client certificate must be
+        the one pinned to the record (ca-only: any trusted certificate); without client
+        certificates (server / plain mode) the venID cannot be verified and is taken as sent.
+        """
+        if self.vtn.config.tls.mode != "mutual":
+            return True
+        if self.vtn.config.tls.fingerprint_policy == "ca-only":
+            return True
+        return bool(tls and tls.fingerprint and ven.fingerprint == tls.fingerprint)
+
     def _note_once(self, s, ven: models.Ven, code: str, severity: str, message: str, evidence: dict, detail=None):
         """Record a finding once per VEN (and detail) per process, and never twice in the database."""
         key = (ven.id, code, detail)
@@ -147,6 +159,10 @@ class MessageLogger:
             message_pk = msg.id
             if ven_id:
                 ven = s.scalar(select(models.Ven).where(models.Ven.ven_id == ven_id))
+                if ven is not None and not self._vouched(ven, tls):
+                    # The venID is only a claim at this point (authentication follows and will answer
+                    # 463): keep the raw message, but attribute nothing to the VEN record.
+                    ven = None
                 if ven is not None:
                     ven.last_seen_at = now
                     if remote and ven.last_remote and remote != ven.last_remote:

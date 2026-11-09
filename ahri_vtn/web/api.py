@@ -89,7 +89,17 @@ def _float(value, default=None):
 def _int(value, default=None):
     if value is None or value == "":
         return default
-    return int(float(value))
+    f = float(value)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError("not a finite number")
+    return int(f)
+
+
+def _csv_cell(value):
+    """Neutralise spreadsheet formula injection in VEN-supplied strings (=, +, -, @, tab, CR)."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 def _qint(qs, name: str, default: int, lo: int, hi: int) -> int:
@@ -98,8 +108,8 @@ def _qint(qs, name: str, default: int, lo: int, hi: int) -> int:
     if raw in (None, ""):
         return default
     try:
-        value = int(float(raw))
-    except (TypeError, ValueError):
+        value = _int(raw)
+    except (TypeError, ValueError, OverflowError):
         raise web.HTTPBadRequest(text=f"{name} must be a number")
     return max(lo, min(hi, value))
 
@@ -112,6 +122,8 @@ def _qfloat(qs, name: str, default: float, lo: float, hi: float) -> float:
         value = float(raw)
     except (TypeError, ValueError):
         raise web.HTTPBadRequest(text=f"{name} must be a number")
+    if value != value:
+        raise web.HTTPBadRequest(text=f"{name} must be a number")
     return max(lo, min(hi, value))
 
 
@@ -120,6 +132,7 @@ class Api:
         self.vtn = vtn
         for name, proxy in service_proxies(vtn).items():
             setattr(self, name, proxy)
+        self._sse_clients = 0
 
     # ------------------------------------------------------------------ status
 
@@ -253,8 +266,9 @@ class Api:
         writer.writerow(["ts", "received_at", "report", "r_id", "canonical_rid", "resource_id", "value",
                          "report_request_id", "confidence", "accuracy", "data_quality"])
         for r in rows:
-            writer.writerow([r.ts.isoformat(), r.received_at.isoformat(), r.spec_name, r.r_id, r.spec_rid,
-                             r.resource_id, r.value, r.report_request_id, r.confidence, r.accuracy, r.data_quality])
+            writer.writerow([_csv_cell(v) for v in (r.ts.isoformat(), r.received_at.isoformat(), r.spec_name, r.r_id,
+                                                      r.spec_rid, r.resource_id, r.value, r.report_request_id,
+                                                      r.confidence, r.accuracy, r.data_quality)])
         return web.Response(text=out.getvalue(), content_type="text/csv",
                             headers={"Content-Disposition": f'attachment; filename="ven{ven_pk}_samples.csv"'})
 
@@ -446,12 +460,13 @@ class Api:
     # ------------------------------------------------------------------ live stream
 
     async def stream(self, request):
-        if len(self.vtn.bus._subscribers) >= self.vtn.config.ui.max_sse_clients:
+        if self._sse_clients >= self.vtn.config.ui.max_sse_clients:
             return error("Too many live-update clients", 503)
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache",
                                                "X-Accel-Buffering": "no"})
         await response.prepare(request)
         queue = self.vtn.bus.subscribe()
+        self._sse_clients += 1
         try:
             await response.write(b": connected\n\n")
             while True:
@@ -465,6 +480,7 @@ class Api:
         except (asyncio.CancelledError, ConnectionResetError):
             pass
         finally:
+            self._sse_clients -= 1
             self.vtn.bus.unsubscribe(queue)
         return response
 

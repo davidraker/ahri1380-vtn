@@ -461,7 +461,8 @@ def _pretty_xml(raw: Optional[str]) -> str:
         return ""
     try:
         from lxml import etree
-        parser = etree.XMLParser(remove_blank_text=True)
+        parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False, no_network=True, load_dtd=False,
+                                 huge_tree=False)
         tree = etree.fromstring(raw.encode("utf-8"), parser)
         return etree.tostring(tree, pretty_print=True, encoding="unicode")
     except Exception:   # noqa: BLE001

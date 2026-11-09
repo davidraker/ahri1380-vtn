@@ -65,7 +65,7 @@ class AhriVtn:
             ven_lookup=self.registry.ven_lookup, validate_xml=config.schema_mode,
             ssl_context=self.tls_report.context if self.tls_report else None,
             verify_message_signatures=sig.mode,
-            verify_fingerprints=(config.tls.fingerprint_policy != "ca-only"),
+            verify_fingerprints=(config.tls.mode == "mutual" and config.tls.fingerprint_policy != "ca-only"),
             show_fingerprint=False, **signing)
         self.server.app._client_max_size = config.limits.max_message_body_bytes
         self.server.app.middlewares.append(make_rate_limit_middleware(config.limits.requests_per_minute_per_ip))
@@ -118,7 +118,7 @@ class AhriVtn:
         self.messages.install()
         await self.server.run()
         if self.web_app is not None:
-            self._ui_runner = web.AppRunner(self.web_app, access_log=None)
+            self._ui_runner = web.AppRunner(self.web_app, access_log=logging.getLogger("ahri_vtn.ui.access"))
             await self._ui_runner.setup()
             site = web.TCPSite(self._ui_runner, host=self.config.ui.host, port=self.config.ui.port,
                                ssl_context=self.ui_tls_report.context)
@@ -180,5 +180,5 @@ class AhriVtn:
 @web.middleware
 async def _tls_evidence_middleware(request: web.Request, handler):
     """Record the TLS parameters and client certificate of this connection for the message log."""
-    current_tls.set(tlsmod.evidence_from_transport(request.transport))
+    current_tls.set(tlsmod.evidence_from_transport(request.transport, request.remote))
     return await handler(request)

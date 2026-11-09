@@ -118,5 +118,5 @@ max_sse_clients = 20
 [limits]
 max_vens_auto_accept = 50
 max_message_body_bytes = 1048576
-requests_per_minute_per_ip = 600
+requests_per_minute_per_ip = 3000     # per client address, both listeners (VEN fleets behind NAT share one)
 auth_failures_per_minute = 5

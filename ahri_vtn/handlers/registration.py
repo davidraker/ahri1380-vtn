@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Optional
 
 from openleadr import errors as oadr_errors
 from openleadr import utils as oadr_utils
-from sqlalchemy import desc, func, select
+from sqlalchemy import desc, func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from .. import spec
 from ..db import models
@@ -49,7 +50,10 @@ class RegistrationHandler:
                              fingerprint=fp, fingerprint_source="operator" if fp else None,
                              fingerprint_set_at=utcnow() if fp else None)
             s.add(ven)
-            s.flush()
+            try:
+                s.flush()
+            except IntegrityError:
+                raise ValueError(f"A VEN named '{ven_name}' or a VEN with fingerprint {fp} already exists")
             if fp:
                 s.add(models.RegistrationEvent(ven_pk=ven.id, kind="pin", accepted=True,
                                                details={"fingerprint": fp, "by": "operator"}))
@@ -99,6 +103,10 @@ class RegistrationHandler:
                 for col in ("fingerprint_sha256", "cert_subject", "cert_issuer", "cert_not_before", "cert_not_after",
                             "cert_key_type", "cert_key_bits"):
                     setattr(ven, col, None)
+            try:
+                s.flush()
+            except IntegrityError:
+                raise ValueError(f"Fingerprint {fp} is already pinned to another VEN")
             s.add(models.RegistrationEvent(ven_pk=ven.id, kind="pin", accepted=True,
                                            details={"fingerprint": fp, "previous": previous, "by": source}))
             for rej in s.scalars(select(models.RejectedRegistration)
@@ -261,9 +269,20 @@ class RegistrationHandler:
                                  tls=tls, remote=remote, details=details,
                                  message=f"Unknown VEN '{ven_name}' and auto-accept is off or at its limit")
             if not ven.fingerprint:
-                ven.fingerprint = fp
-                ven.fingerprint_source = "first-use"
-                ven.fingerprint_set_at = utcnow()
+                # Conditional update: two devices registering the same new name concurrently must
+                # not both win (only the row that is still unpinned takes the fingerprint).
+                try:
+                    rows = s.execute(update(models.Ven).where(models.Ven.id == ven.id, models.Ven.fingerprint.is_(None))
+                                     .values(fingerprint=fp, fingerprint_source="first-use", fingerprint_set_at=utcnow())
+                                     ).rowcount
+                except IntegrityError:
+                    rows = 0
+                if rows != 1:
+                    s.rollback()
+                    self._refuse(s, reason="fingerprint-mismatch", ven=ven, ven_name=ven_name,
+                                 received_ven_id=received_ven_id, tls=tls, remote=remote, details=details,
+                                 message=f"VEN '{ven.ven_name}' was pinned to another certificate concurrently")
+                s.refresh(ven)
                 self._apply_cert_details(ven, cert)
                 s.add(models.RegistrationEvent(ven_pk=ven.id, kind="pin", accepted=True,
                                                details={"fingerprint": fp, "by": "first-use"}))
@@ -288,7 +307,9 @@ class RegistrationHandler:
             deviations.append(spec.Deviation("info", "cert-fingerprint-changed",
                                              f"VEN '{ven.ven_name}' now uses certificate {fp} (previously {ven.fingerprint})",
                                              {"previous": ven.fingerprint, "current": fp}))
-        if ven.fingerprint != fp:
+        if ven.fingerprint != fp and (owner is None or owner.id == ven.id):
+            # one certificate identifies one VEN record; a certificate already recorded on another
+            # VEN (warned above) is not duplicated here
             ven.fingerprint = fp
             ven.fingerprint_source = "ca-only"
             ven.fingerprint_set_at = utcnow()
@@ -324,7 +345,7 @@ class RegistrationHandler:
         details = jsonable({k: v for k, v in registration_info.items() if k != "fingerprint"})
         now = utcnow()
         tls = current_tls.get()
-        remote = None
+        remote = tls.remote if tls else None
         mutual = tls is not None and tls.secure and tls.peer is not None
 
         with self.vtn.db.session() as s:

@@ -41,29 +41,7 @@ class TlsSetupError(RuntimeError):
 # Certificates
 # ---------------------------------------------------------------------------------------------
 
-def openadr_fingerprint(der: bytes) -> str:
-    """Last 10 bytes of the SHA-256 of the DER certificate, colon separated (2.0b 10.5.1)."""
-    digest = hashlib.sha256(der).hexdigest().upper()
-    return ":".join(digest[i:i + 2] for i in range(44, 64, 2))
-
-
-def sha256_fingerprint(der: bytes) -> str:
-    digest = hashlib.sha256(der).hexdigest().upper()
-    return ":".join(digest[i:i + 2] for i in range(0, 64, 2))
-
-
-def normalize_fingerprint(value: str) -> str:
-    """
-    Accept the 29-character OpenADR form or a full SHA-256 fingerprint (with or without colons,
-    any case) and return the OpenADR form. Raises ValueError for anything else.
-    """
-    hexdigits = "".join(ch for ch in value.upper() if ch in "0123456789ABCDEF")
-    if len(hexdigits) == 20:
-        return ":".join(hexdigits[i:i + 2] for i in range(0, 20, 2))
-    if len(hexdigits) == 64:
-        return ":".join(hexdigits[i:i + 2] for i in range(44, 64, 2))
-    raise ValueError("A fingerprint is the 10-byte OpenADR form (XX:XX:...:XX, 29 characters) or a full "
-                     "SHA-256 fingerprint (32 bytes)")
+from .fingerprint import normalize_fingerprint, openadr_fingerprint, sha256_fingerprint  # noqa: E402,F401
 
 
 @dataclass
@@ -305,6 +283,7 @@ class TlsEvidence:
     cipher: Optional[str] = None
     peer_der: Optional[bytes] = None
     peer: Optional[CertInfo] = None
+    remote: Optional[str] = None        # peer address of the connection
 
     @property
     def secure(self) -> bool:
@@ -321,14 +300,15 @@ class TlsEvidence:
         return self.cipher in OPENADR_SUITES.values()
 
 
-def evidence_from_transport(transport) -> TlsEvidence:
+def evidence_from_transport(transport, remote: Optional[str] = None) -> TlsEvidence:
     ssl_object = transport.get_extra_info("ssl_object") if transport is not None else None
     if ssl_object is None:
-        return TlsEvidence()
+        return TlsEvidence(remote=remote)
     cipher = ssl_object.cipher()
     der = ssl_object.getpeercert(binary_form=True)
     peer = inspect_der(der) if der else None
-    return TlsEvidence(version=ssl_object.version(), cipher=cipher[0] if cipher else None, peer_der=der, peer=peer)
+    return TlsEvidence(version=ssl_object.version(), cipher=cipher[0] if cipher else None, peer_der=der, peer=peer,
+                       remote=remote)
 
 
 # ---------------------------------------------------------------------------------------------
