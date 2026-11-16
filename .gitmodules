@@ -1,0 +1,4 @@
+[submodule "openleadr-python"]
+	path = openleadr-python
+	url = https://github.com/davidraker/openleadr-python.git
+	branch = ahri-1380

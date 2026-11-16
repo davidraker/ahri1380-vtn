@@ -33,19 +33,16 @@ Contents
   is needed. The operator UI listens on a second port (9443) that only the operator needs.
 - An OpenSSL build that can negotiate the two OpenADR 2.0b default cipher suites; see section
   13.6, and run `ahri-vtn tls-selfcheck` after installation.
-- The `ahri1380/` folder of the repository with its `openleadr-python` submodule (the OpenLEADR fork,
-  branch `ahri-1380`). All commands below are run from `ahri1380/`.
+- The `ahri1380-vtn` repository with its `openleadr-python` submodule (the OpenLEADR fork,
+  branch `ahri-1380`). All commands below are run from the repository root.
 - A browser for the web interface. No internet access is required at run time; all assets are
   served locally.
 
 ## 2. Installation
 
 ```bash
-git clone <repository-url> open_adr_work
-cd open_adr_work
-git submodule update --init ahri1380/openleadr-python
-cd ahri1380
-git -C openleadr-python checkout ahri-1380
+git clone --recurse-submodules https://github.com/davidraker/ahri1380-vtn.git
+cd ahri1380-vtn
 
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate

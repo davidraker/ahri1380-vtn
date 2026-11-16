@@ -30,7 +30,8 @@ Full installation and usage instructions: [docs/user_guide.md](docs/user_guide.m
 
 ## Layout
 
-All components live in this folder (`ahri1380/` in the workspace repository):
+This repository holds the complete tool; the OpenLEADR fork it depends on is the submodule
+`openleadr-python/` (branch `ahri-1380`). Clone with `--recurse-submodules`.
 
 ```
 openleadr-python/        git submodule: OpenLEADR fork, branch ahri-1380 (VTN extensions, see docs/roadmap.rst)
@@ -51,7 +52,8 @@ docs/                    user guide
 ## Setup
 
 ```bash
-cd ahri1380
+git clone --recurse-submodules https://github.com/davidraker/ahri1380-vtn.git
+cd ahri1380-vtn
 python -m venv .venv && source .venv/bin/activate
 pip install -e ./openleadr-python        # the fork (branch ahri-1380)
 pip install -e .[dev]
