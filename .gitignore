@@ -23,3 +23,5 @@ certs/
 *.p12
 *.sqlite-shm
 *.sqlite-wal
+.venv/
+venv/

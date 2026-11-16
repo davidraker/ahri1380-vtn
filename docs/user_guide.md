@@ -25,8 +25,9 @@ Contents
 
 ## 1. Requirements
 
-- Linux, macOS or Windows (WSL recommended) with Python 3.10 to 3.13. All dependencies install
-  from prebuilt wheels; no compiler or development headers are needed.
+- Linux, macOS or Windows (WSL recommended) with Python 3.10 to 3.14. All dependencies install
+  from prebuilt wheels; no compiler or development headers are needed. A deployed VTN runs on
+  Linux (the systemd unit and the container image assume it).
 - Network connectivity between the VTN host and the VEN. The VEN polls the VTN over HTTPS
   (pull mode, OpenADR 2.0b mutual TLS), so the VTN host must be reachable from the equipment or
   from the vendor cloud on the OpenADR port (443 by default). No inbound connection to the VEN
@@ -47,30 +48,44 @@ cd ahri1380-vtn
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\Scripts\activate
 pip install -e ./openleadr-python      # the OpenLEADR fork with the VTN extensions
-pip install -e ".[dev]"                # the tool itself (+ pytest for self-tests); add ",postgres" for PostgreSQL
+pip install -e ".[dev]"                # the tool itself plus pytest and pip-audit for the self-tests
 ```
+
+On a server, install without the test tooling: `pip install -e .` for SQLite, or
+`pip install -e ".[postgres]"` when the database is PostgreSQL.
 
 Distribution notes: Debian and Ubuntu need `python3-full` (or `python3-venv`) before `python3 -m venv`
 works; Ubuntu 26.04 ships Python 3.14, on which the tool and its dependencies install and pass
 the test suite. If the checkout contains a `build/` directory from an earlier non-editable
 install, delete it first: setuptools would otherwise package the stale files it holds.
 
-Create the lab certificates and the operator password, then verify the installation:
+Then create the lab certificates and the configuration, in this order:
 
 ```bash
 ahri-vtn certs quickstart --san <dns-name-or-ip-the-units-will-use> --san localhost
-ahri-vtn hash-password                  # paste the output into [ui] basic_auth_password_hash
-cp config.example.toml config.toml      # then fill in the [tls] / [ui] paths printed by quickstart
+cp config.example.toml config.toml
+ahri-vtn hash-password                  # prompts twice; prints the pbkdf2_sha256$... value
+# edit config.toml: paste the hash into [ui] basic_auth_password_hash and check that the
+# [tls] / [ui] certificate paths match the files quickstart created under certs/
 ahri-vtn tls-selfcheck                  # both OpenADR 2.0b default cipher suites must say OK
-python -m sim_ven.ahri_sim_ven --help
-pytest tests                            # optional self-test, a few minutes
 ```
 
 `certs quickstart` writes a lab CA, RSA and ECC VTN certificates, a certificate for the
-simulator and an operator certificate into `certs/` (section 13.3). The `pytest tests` run
-starts a VTN with its own throw-away certificates and the simulated VEN on random ports and
-exercises registration over mutual TLS, reports, events, overrides, the UI security rules and
-every conformance scenario.
+simulator and an operator certificate into `certs/` (section 13.3) and prints the fingerprint
+to put in `[ui] operator_fingerprints` if you want to restrict operator certificates to that one.
+The tool refuses to start, and `tls-selfcheck` refuses to run, until `config.toml` is complete,
+so the self-check doubles as a configuration check.
+
+Optional self-test of the installation:
+
+```bash
+pytest tests                            # a few minutes; both suites also run against PostgreSQL
+                                        # with AHRI_VTN_TEST_DB_URL set (section 11)
+```
+
+The run starts a VTN with its own throw-away certificates and the simulated VEN on random
+ports and exercises registration over mutual TLS, reports, events, overrides, the UI security
+rules and every conformance scenario.
 
 ## 3. Configuration
 
