@@ -135,14 +135,22 @@ development setting `[tls] mode = "plain"`.
 ## 4. Starting the VTN
 
 ```bash
-ahri-vtn --config config.toml            # same as: ahri-vtn run --config config.toml
+ahri-vtn --config config.toml --port 8443    # first run on a workstation (see below for 443)
 ```
 
+**Port 443 and permissions.** The default OpenADR port is 443 because vendors expect a URL
+without a port, but on Linux a normal user cannot bind ports below 1024 and the tool stops with
+"Permission denied binding port 443" and a list of options. For development, pass
+`--port 8443` (or set `port = 8443`) and give VENs `https://<host>:8443/OpenADR2/Simple/2.0b`.
+For a deployment, run the tool under `deploy/ahri-vtn.service`, whose `AmbientCapabilities`
+line grants `CAP_NET_BIND_SERVICE` to the service, or run the container image with a port
+mapping. A third option for a dedicated virtual environment is
+`sudo setcap cap_net_bind_service=+ep $(readlink -f .venv/bin/python)`, which lets that
+interpreter, and anything else it runs, bind privileged ports. Do not run the VTN as root.
+
 Useful flags: `--host`, `--port`, `--db`, `--vtn-id`, `--schema-mode strict|lenient`,
-`--log-level DEBUG`, `--no-web` (OpenADR listener only). Port 443 needs the
-`CAP_NET_BIND_SERVICE` capability or a container port mapping (section 13.7); use `port = 8443`
-where that is not possible. The console prints both URLs, the VTN certificates and their
-fingerprints:
+`--log-level DEBUG`, `--no-web` (OpenADR listener only). The console prints both URLs, the VTN
+certificates and their fingerprints:
 
 ```
 AHRI 1380 VTN 'ahri1380-vtn' listening on https://localhost/OpenADR2/Simple/2.0b (tls mutual, fingerprint policy pinned, signatures none)
@@ -343,9 +351,11 @@ The simulator is useful to learn the tool, to rehearse a test sequence, and to c
 installation before equipment arrives.
 
 ```bash
-python -m sim_ven.ahri_sim_ven --vtn-url https://localhost/OpenADR2/Simple/2.0b --name sim-hvac \
+python -m sim_ven.ahri_sim_ven --vtn-url https://localhost:8443/OpenADR2/Simple/2.0b --name sim-hvac \
     --cert certs/ven-sim-hvac.crt --key certs/ven-sim-hvac.key --ca-file certs/lab-ca.crt
 ```
+
+(Drop `:8443` when the VTN runs on 443.)
 
 `certs quickstart` already created `ven-sim-hvac.crt`; `ahri-vtn certs ven --name other` makes
 more. TLS options: `--cert/--key/--ca-file`, `--no-check-hostname`, `--sign-messages` (XML
@@ -481,8 +491,9 @@ re-register automatically because their venIDs are no longer known.
 - **UI answers 401 or 403.** 401: no or wrong credentials; after five failures in a minute the
   address is throttled (429). 403 on a form: the page was stale, reload it (CSRF token). 403 on
   the API: send JSON, not a form body, and no cross-site `Origin`.
-- **Permission denied binding port 443.** Run under the systemd unit (`CAP_NET_BIND_SERVICE`),
-  in the container, or set `port = 8443`.
+- **Permission denied binding port 443.** Normal users cannot bind ports below 1024. Use
+  `--port 8443` for development, the systemd unit or the container for deployment, or `setcap`
+  on a dedicated interpreter (section 4).
 - **HTTP 400 on messages.** Only in `strict` mode. Switch to `lenient` to see the message and
   the violation recorded as a finding.
 - **No report data.** Check the Report requests table on the VEN page: `queued` means the VEN

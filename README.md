@@ -72,8 +72,8 @@ section 11).
 ## Running
 
 ```bash
-ahri-vtn --config config.toml                     # OpenADR on https://<host>/OpenADR2/Simple/2.0b, UI on https://127.0.0.1:9443/ui/
-python -m sim_ven.ahri_sim_ven --name sim-hvac --vtn-url https://localhost/OpenADR2/Simple/2.0b \
+ahri-vtn --config config.toml --port 8443         # workstation run; 443 needs CAP_NET_BIND_SERVICE (systemd unit or container)
+python -m sim_ven.ahri_sim_ven --name sim-hvac --vtn-url https://localhost:8443/OpenADR2/Simple/2.0b \
     --cert certs/ven-sim-hvac.crt --key certs/ven-sim-hvac.key --ca-file certs/lab-ca.crt
 ```
 

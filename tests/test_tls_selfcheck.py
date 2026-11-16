@@ -161,3 +161,32 @@ basic_auth_password_hash = "{hashed}"
     (tmp_path / "bad.toml").write_text('[tls]\nmode = "mutual"\n')
     assert main(["run", "--config", "bad.toml"]) == 2
     assert "Refusing to start" in capsys.readouterr().err
+
+
+def test_privileged_port_gives_actionable_message(pki, tmp_path, capsys, monkeypatch):
+    """A normal user cannot bind port 1; the CLI must explain the options instead of a traceback."""
+    import os
+    if os.geteuid() == 0:
+        pytest.skip("running as root: privileged ports bind")
+    from ahri_vtn.__main__ import main
+    monkeypatch.chdir(tmp_path)
+    assert main(["certs", "quickstart", "--san", "localhost"]) == 0
+    capsys.readouterr()
+    from ahri_vtn.web.auth import hash_password
+    (tmp_path / "config.toml").write_text(f'''
+port = 1
+[tls]
+cert = "certs/vtn-rsa.crt"
+key = "certs/vtn-rsa.key"
+ecc_cert = "certs/vtn-ecc.crt"
+ecc_key = "certs/vtn-ecc.key"
+client_ca_file = "certs/ven-trust.pem"
+[ui]
+port = 0
+operator_ca_file = "certs/operator-ca.crt"
+basic_auth_user = "lab"
+basic_auth_password_hash = "{hash_password('x', iterations=1000)}"
+''')
+    assert main(["run", "--config", "config.toml", "--db", f"sqlite:///{tmp_path}/p.sqlite"]) == 2
+    err = capsys.readouterr().err
+    assert "Permission denied binding port 1" in err and "--port 8443" in err and "CAP_NET_BIND_SERVICE" in err

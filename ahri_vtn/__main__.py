@@ -66,8 +66,29 @@ def cmd_run(args) -> int:
     except Exception as err:   # noqa: BLE001   (schema mismatch, unreadable database, ...)
         print(f"Could not start: {err.__class__.__name__}: {err}", file=sys.stderr)
         return 2
-    vtn.run()
+    try:
+        vtn.run()
+    except PermissionError as err:
+        print(bind_permission_help(config, err), file=sys.stderr)
+        return 2
+    except OSError as err:
+        print(f"Could not open a listener: {err}\n(OpenADR {config.host}:{config.port}, UI {config.ui.host}:{config.ui.port}; "
+              "is another process using the port?)", file=sys.stderr)
+        return 2
     return 0
+
+
+def bind_permission_help(config, err) -> str:
+    port = config.port if config.port < 1024 else config.ui.port
+    return (f"Permission denied binding port {port} ({err}).\n"
+            "Ports below 1024 need the CAP_NET_BIND_SERVICE capability on Linux. Options:\n"
+            f"  1. Development run: use an unprivileged port, e.g.  ahri-vtn --config config.toml --port 8443\n"
+            "     (VENs then use https://<host>:8443/OpenADR2/Simple/2.0b).\n"
+            "  2. Deployment: run under deploy/ahri-vtn.service, which grants the capability to the service,\n"
+            "     or run the container image with a port mapping.\n"
+            "  3. Grant the capability to this interpreter (affects everything it runs; only for a dedicated venv):\n"
+            f"     sudo setcap cap_net_bind_service=+ep {os.path.realpath(sys.executable)}\n"
+            "Running the VTN as root is not one of the options.")
 
 
 def cmd_certs(args) -> int:
